@@ -30,6 +30,19 @@ enum Commands {
         #[arg(long, default_value = "civic.db")]
         db: String,
     },
+    /// Ingest all Artifact JSON files in a directory into SQLite
+    IngestDir {
+        /// Directory containing artifact JSON files
+        dir: PathBuf,
+
+        /// Optional config file path
+        #[arg(long)]
+        config: Option<PathBuf>,
+
+        /// SQLite DB path
+        #[arg(long)]
+        db: Option<String>,
+    },
     /// Build/update an Obsidian vault from the SQLite database
     BuildVault {
         /// Optional config file path
@@ -43,6 +56,12 @@ enum Commands {
         /// Vault root directory
         #[arg(long)]
         vault: Option<PathBuf>,
+    },
+    /// Run the weekly pipeline: collect -> ingest-dir -> build-vault
+    RunWeekly {
+        /// Config file path
+        #[arg(long)]
+        config: PathBuf,
     },
 }
 
@@ -64,17 +83,20 @@ fn main() -> Result<()> {
             SchemaCommands::Export { out_dir } => schema_export(out_dir),
         },
         Commands::Ingest { artifact_json, db } => ingest_artifact(artifact_json, &db),
+        Commands::IngestDir { dir, config, db } => {
+            let config = config.as_ref().map(load_config).transpose()?;
+            let storage = resolve_storage(config.as_ref());
+            let db_path = db.unwrap_or(storage.db_path);
+            ingest_dir(dir, &db_path)
+        }
         Commands::BuildVault { config, db, vault } => {
             let config = config.as_ref().map(load_config).transpose()?;
-            let storage = config.as_ref().and_then(|cfg| cfg.storage.as_ref());
-            let db_path = db
-                .or_else(|| storage.and_then(|value| value.db_path.clone()))
-                .unwrap_or_else(|| "civic.db".to_string());
-            let vault_path = vault
-                .or_else(|| storage.and_then(|value| value.vault_path.clone()).map(PathBuf::from))
-                .unwrap_or_else(|| PathBuf::from("vault"));
+            let storage = resolve_storage(config.as_ref());
+            let db_path = db.unwrap_or(storage.db_path);
+            let vault_path = vault.unwrap_or(storage.vault_path);
             build_vault(&db_path, vault_path)
         }
+        Commands::RunWeekly { config } => run_weekly(config),
     }
 }
 
@@ -90,10 +112,35 @@ struct StorageConfig {
     out_dir: Option<String>,
 }
 
+#[derive(Debug)]
+struct ResolvedStorage {
+    db_path: String,
+    vault_path: PathBuf,
+    out_dir: PathBuf,
+}
+
 fn load_config(path: &PathBuf) -> Result<Config> {
     let raw = fs::read_to_string(path)?;
     let config = toml::from_str(&raw)?;
     Ok(config)
+}
+
+fn resolve_storage(config: Option<&Config>) -> ResolvedStorage {
+    let storage = config.and_then(|cfg| cfg.storage.as_ref());
+    let db_path = storage
+        .and_then(|value| value.db_path.clone())
+        .unwrap_or_else(|| "civic.db".to_string());
+    let vault_path = storage
+        .and_then(|value| value.vault_path.clone())
+        .unwrap_or_else(|| "vault".to_string());
+    let out_dir = storage
+        .and_then(|value| value.out_dir.clone())
+        .unwrap_or_else(|| "out".to_string());
+    ResolvedStorage {
+        db_path,
+        vault_path: PathBuf::from(vault_path),
+        out_dir: PathBuf::from(out_dir),
+    }
 }
 
 fn schema_export(out_dir: PathBuf) -> Result<()> {
@@ -152,10 +199,78 @@ fn validate_artifact(a: &civic_core::schema::Artifact) -> Result<()> {
     Ok(())
 }
 
+fn ingest_dir(dir: PathBuf, db_path: &str) -> Result<()> {
+    if !dir.exists() {
+        println!("No artifacts directory found at {}", dir.display());
+        return Ok(());
+    }
+
+    let mut ingested = 0usize;
+    let mut failed = 0usize;
+    let mut skipped = 0usize;
+
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            skipped += 1;
+            continue;
+        }
+        match ingest_artifact(path.clone(), db_path) {
+            Ok(()) => ingested += 1,
+            Err(err) => {
+                failed += 1;
+                eprintln!("Failed to ingest {}: {err}", path.display());
+            }
+        }
+    }
+
+    println!(
+        "Ingested {} artifacts, {} failed, {} skipped in {}",
+        ingested,
+        failed,
+        skipped,
+        dir.display()
+    );
+    Ok(())
+}
+
 // Build/update an Obsidian vault from the sqlite database. Will be expanded further.
 fn build_vault(db_path: &str, vault: PathBuf) -> Result<()> {
     let conn = civic_core::db::open(db_path)?;
     obsidian::vault::build_vault(&conn, &vault)?;
     println!("Vault updated at {}", vault.display());
+    Ok(())
+}
+
+fn run_weekly(config_path: PathBuf) -> Result<()> {
+    let config = load_config(&config_path)?;
+    let storage = resolve_storage(Some(&config));
+
+    let output = std::process::Command::new("python")
+        .arg("workers/collectors/ky_public_notice_larue.py")
+        .arg("--config")
+        .arg(&config_path)
+        .output()?;
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("Collector failed with status {}", output.status);
+        if !stdout.is_empty() {
+            eprintln!("Collector stdout:\n{stdout}");
+        }
+        if !stderr.is_empty() {
+            eprintln!("Collector stderr:\n{stderr}");
+        }
+        return Err(anyhow!("Collector exited with failure"));
+    }
+
+    let artifacts_dir = storage.out_dir.join("artifacts");
+    ingest_dir(artifacts_dir, &storage.db_path)?;
+    build_vault(&storage.db_path, storage.vault_path)?;
     Ok(())
 }

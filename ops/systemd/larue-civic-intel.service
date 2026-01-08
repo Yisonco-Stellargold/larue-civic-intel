@@ -6,7 +6,7 @@ After=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/larue-civic-intel
-ExecStart=/usr/local/bin/larue build-vault --config /opt/larue-civic-intel/config.toml
+ExecStart=/usr/local/bin/larue run-weekly --config /opt/larue-civic-intel/config.toml
 
 [Install]
 WantedBy=multi-user.target

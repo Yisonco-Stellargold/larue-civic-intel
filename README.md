@@ -11,6 +11,7 @@ Key principles:
 - Transparent scoring methodologies
 - Human-auditable memory via Markdown (Obsidian-compatible)
 - Designed for low-power hardware (Raspberry Pi)
+- Python 3.11+ for collectors (tomllib-based config loading)
 
 This repository contains infrastructure only.  
 Interpretive frameworks are versioned, documented, and reproducible.
@@ -23,3 +24,9 @@ Interpretive frameworks are versioned, documented, and reproducible.
 3. Run commands with the config path, for example:
    - `larue build-vault --config ./config.toml`
    - `python workers/collectors/ky_public_notice_larue.py --config ./config.toml`
+
+## Weekly pipeline
+
+Run the full weekly pipeline (collector -> ingest-dir -> build-vault) with:
+
+- `larue run-weekly --config ./config.toml`
