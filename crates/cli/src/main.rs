@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use schemars::schema_for;
+use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
 
@@ -29,15 +30,19 @@ enum Commands {
         #[arg(long, default_value = "civic.db")]
         db: String,
     },
-        /// Build/update an Obsidian vault from the SQLite database
+    /// Build/update an Obsidian vault from the SQLite database
     BuildVault {
+        /// Optional config file path
+        #[arg(long)]
+        config: Option<PathBuf>,
+
         /// SQLite DB path
-        #[arg(long, default_value = "civic.db")]
-        db: String,
+        #[arg(long)]
+        db: Option<String>,
 
         /// Vault root directory
-        #[arg(long, default_value = "vault")]
-        vault: PathBuf,
+        #[arg(long)]
+        vault: Option<PathBuf>,
     },
 }
 
@@ -59,9 +64,36 @@ fn main() -> Result<()> {
             SchemaCommands::Export { out_dir } => schema_export(out_dir),
         },
         Commands::Ingest { artifact_json, db } => ingest_artifact(artifact_json, &db),
-        Commands::BuildVault { db, vault } => build_vault(&db, vault),
-
+        Commands::BuildVault { config, db, vault } => {
+            let config = config.as_ref().map(load_config).transpose()?;
+            let storage = config.as_ref().and_then(|cfg| cfg.storage.as_ref());
+            let db_path = db
+                .or_else(|| storage.and_then(|value| value.db_path.clone()))
+                .unwrap_or_else(|| "civic.db".to_string());
+            let vault_path = vault
+                .or_else(|| storage.and_then(|value| value.vault_path.clone()).map(PathBuf::from))
+                .unwrap_or_else(|| PathBuf::from("vault"));
+            build_vault(&db_path, vault_path)
+        }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct Config {
+    storage: Option<StorageConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StorageConfig {
+    db_path: Option<String>,
+    vault_path: Option<String>,
+    out_dir: Option<String>,
+}
+
+fn load_config(path: &PathBuf) -> Result<Config> {
+    let raw = fs::read_to_string(path)?;
+    let config = toml::from_str(&raw)?;
+    Ok(config)
 }
 
 fn schema_export(out_dir: PathBuf) -> Result<()> {

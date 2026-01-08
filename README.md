@@ -14,3 +14,12 @@ Key principles:
 
 This repository contains infrastructure only.  
 Interpretive frameworks are versioned, documented, and reproducible.
+
+## Configuration
+
+1. Copy the template config:
+   - `cp config.example.toml config.toml`
+2. Edit `config.toml` for your environment.
+3. Run commands with the config path, for example:
+   - `larue build-vault --config ./config.toml`
+   - `python workers/collectors/ky_public_notice_larue.py --config ./config.toml`
