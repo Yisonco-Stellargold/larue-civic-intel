@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SourceRef",
+  "type": "object",
+  "required": [
+    "kind",
+    "retrieved_at",
+    "value"
+  ],
+  "properties": {
+    "kind": {
+      "type": "string"
+    },
+    "retrieved_at": {
+      "type": "string"
+    },
+    "value": {
+      "type": "string"
+    }
+  }
+}
