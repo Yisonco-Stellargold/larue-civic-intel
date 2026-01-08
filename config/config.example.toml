@@ -1,0 +1,23 @@
+[project]
+jurisdiction = "LaRue County, KY"
+county = "Larue"
+state = "KY"
+
+[storage]
+db_path = "civic.db"
+vault_path = "vault"
+out_dir = "out"
+
+[sources.ky_public_notice]
+enabled = true
+query = "Larue"
+tags = ["public_notice","larue","ky"]
+# optional: base_url override if needed later
+
+[sources.fiscal_court]
+enabled = false
+base_url = ""
+
+[sources.school_board]
+enabled = false
+base_url = ""

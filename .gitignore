@@ -50,3 +50,7 @@ __pycache__/
 # Obsidian runtime files
 .obsidian/workspace*
 .obsidian/cache
+
+# Local runtime configuration
+config.toml
+
