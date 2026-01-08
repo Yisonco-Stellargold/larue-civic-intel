@@ -30,3 +30,7 @@ Interpretive frameworks are versioned, documented, and reproducible.
 Run the full weekly pipeline (collector -> ingest-dir -> build-vault) with:
 
 - `larue run-weekly --config ./config.toml`
+
+Generate a weekly report note and JSON summary with:
+
+- `larue report-weekly --config ./config.toml`

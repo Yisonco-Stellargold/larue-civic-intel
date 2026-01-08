@@ -1,11 +1,15 @@
 import argparse
 import json
+from datetime import datetime, timezone
 from pathlib import Path
+import re
 import tomllib
 
 DEFAULT_OUT_DIR = "out"
 DEFAULT_QUERY = "Larue"
 DEFAULT_TAGS = ["public_notice", "larue", "ky"]
+STATE_LIMIT = 5000
+STATE_FILENAME = "ky_public_notice_state.json"
 
 
 def read_config(path: Path) -> dict:
@@ -46,8 +50,10 @@ def resolve_settings(config: dict) -> tuple[Path, str, list[str]]:
 def write_outputs(out_dir: Path, query: str, tags: list[str]) -> None:
     artifacts_dir = out_dir / "artifacts"
     snapshots_dir = out_dir / "snapshots"
+    state_dir = out_dir / "state"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     snapshots_dir.mkdir(parents=True, exist_ok=True)
+    state_dir.mkdir(parents=True, exist_ok=True)
 
     payload = {"query": query, "tags": tags}
     (artifacts_dir / "ky_public_notice_manifest.json").write_text(
@@ -58,6 +64,56 @@ def write_outputs(out_dir: Path, query: str, tags: list[str]) -> None:
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+    state_path = state_dir / STATE_FILENAME
+    seen_ids = load_state(state_path)
+    artifact_id = f"ky_public_notice:{query.lower()}"
+    if artifact_id in seen_ids:
+        return
+
+    retrieved_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    artifact = {
+        "id": artifact_id,
+        "source": {
+            "kind": "public_notice",
+            "value": f"ky_public_notice:{query}",
+            "retrieved_at": retrieved_at,
+        },
+        "title": f"KY Public Notice: {query}",
+        "body_text": None,
+        "content_type": "application/json",
+        "tags": tags,
+    }
+    artifact_filename = f"ky_public_notice_{slugify(artifact_id)}.json"
+    (artifacts_dir / artifact_filename).write_text(
+        json.dumps(artifact, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    seen_ids.append(artifact_id)
+    save_state(state_path, seen_ids)
+
+
+def load_state(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    seen_ids = data.get("seen_ids", [])
+    if not isinstance(seen_ids, list):
+        return []
+    return [str(value) for value in seen_ids]
+
+
+def save_state(path: Path, seen_ids: list[str]) -> None:
+    trimmed = seen_ids[-STATE_LIMIT:]
+    payload = {"seen_ids": trimmed}
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def slugify(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9]+", "_", value).strip("_").lower()
 
 
 def main() -> None:

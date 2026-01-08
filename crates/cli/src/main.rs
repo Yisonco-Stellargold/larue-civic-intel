@@ -4,6 +4,9 @@ use schemars::schema_for;
 use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
+use time::format_description::well_known::Rfc3339;
+use time::format_description::FormatItem;
+use time::{Duration, OffsetDateTime};
 
 #[derive(Parser)]
 #[command(name = "larue")]
@@ -63,6 +66,12 @@ enum Commands {
         #[arg(long)]
         config: PathBuf,
     },
+    /// Generate a weekly report (last 7 days) from the database
+    ReportWeekly {
+        /// Config file path
+        #[arg(long)]
+        config: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -97,6 +106,7 @@ fn main() -> Result<()> {
             build_vault(&db_path, vault_path)
         }
         Commands::RunWeekly { config } => run_weekly(config),
+        Commands::ReportWeekly { config } => report_weekly(config),
     }
 }
 
@@ -165,18 +175,12 @@ fn schema_export(out_dir: PathBuf) -> Result<()> {
 fn ingest_artifact(path: PathBuf, db_path: &str) -> Result<()> {
     let raw = fs::read_to_string(&path)?;
     let raw_json: serde_json::Value = serde_json::from_str(&raw)?;
-
-    let artifact: civic_core::schema::Artifact =
-        serde_json::from_value(raw_json.clone()).map_err(|e| anyhow!("Schema mismatch: {e}"))?;
-
-    validate_artifact(&artifact)?;
-
     let conn = civic_core::db::open(db_path)?;
-    civic_core::db::upsert_artifact(&conn, &artifact, &raw_json)?;
+    let artifact_id = ingest_artifact_json(&conn, raw_json)?;
 
     println!(
         "Ingested artifact id={} into db={}",
-        artifact.id,
+        artifact_id,
         db_path
     );
     Ok(())
@@ -205,6 +209,8 @@ fn ingest_dir(dir: PathBuf, db_path: &str) -> Result<()> {
         return Ok(());
     }
 
+    let conn = civic_core::db::open(db_path)?;
+
     let mut ingested = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
@@ -219,8 +225,36 @@ fn ingest_dir(dir: PathBuf, db_path: &str) -> Result<()> {
             skipped += 1;
             continue;
         }
-        match ingest_artifact(path.clone(), db_path) {
-            Ok(()) => ingested += 1,
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                failed += 1;
+                eprintln!("Failed to read {}: {err}", path.display());
+                continue;
+            }
+        };
+        let raw_json: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(raw_json) => raw_json,
+            Err(err) => {
+                failed += 1;
+                eprintln!("Failed to parse {}: {err}", path.display());
+                continue;
+            }
+        };
+        let artifact_id = match raw_json.get("id").and_then(|value| value.as_str()) {
+            Some(value) => value,
+            None => {
+                failed += 1;
+                eprintln!("Missing artifact id in {}", path.display());
+                continue;
+            }
+        };
+        if civic_core::db::artifact_exists(&conn, artifact_id)? {
+            skipped += 1;
+            continue;
+        }
+        match ingest_artifact_json(&conn, raw_json) {
+            Ok(_) => ingested += 1,
             Err(err) => {
                 failed += 1;
                 eprintln!("Failed to ingest {}: {err}", path.display());
@@ -236,6 +270,18 @@ fn ingest_dir(dir: PathBuf, db_path: &str) -> Result<()> {
         dir.display()
     );
     Ok(())
+}
+
+fn ingest_artifact_json(
+    conn: &rusqlite::Connection,
+    raw_json: serde_json::Value,
+) -> Result<String> {
+    let artifact: civic_core::schema::Artifact =
+        serde_json::from_value(raw_json.clone()).map_err(|e| anyhow!("Schema mismatch: {e}"))?;
+
+    validate_artifact(&artifact)?;
+    civic_core::db::upsert_artifact(conn, &artifact, &raw_json)?;
+    Ok(artifact.id)
 }
 
 // Build/update an Obsidian vault from the sqlite database. Will be expanded further.
@@ -272,5 +318,96 @@ fn run_weekly(config_path: PathBuf) -> Result<()> {
     let artifacts_dir = storage.out_dir.join("artifacts");
     ingest_dir(artifacts_dir, &storage.db_path)?;
     build_vault(&storage.db_path, storage.vault_path)?;
+    report_weekly(config_path)?;
     Ok(())
+}
+
+fn report_weekly(config_path: PathBuf) -> Result<()> {
+    let config = load_config(&config_path)?;
+    let storage = resolve_storage(Some(&config));
+    let conn = civic_core::db::open(&storage.db_path)?;
+
+    let now = OffsetDateTime::now_utc();
+    let start = now - Duration::days(7);
+    let date_format: &[FormatItem<'_>] = time::macros::format_description!("[year]-[month]-[day]");
+    let date_str = now.format(date_format)?;
+    let window_start = start.format(&Rfc3339)?;
+    let window_end = now.format(&Rfc3339)?;
+
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, title, retrieved_at, source_value
+        FROM artifacts
+        WHERE datetime(retrieved_at) >= datetime(?1)
+          AND datetime(retrieved_at) <= datetime(?2)
+        ORDER BY retrieved_at ASC, id ASC
+        "#,
+    )?;
+
+    let rows = stmt.query_map([window_start.as_str(), window_end.as_str()], |row| {
+        Ok(ReportArtifactRow {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            retrieved_at: row.get(2)?,
+            source_value: row.get(3)?,
+        })
+    })?;
+
+    let mut artifacts = Vec::new();
+    for row in rows {
+        artifacts.push(row?);
+    }
+
+    let report_dir = storage.vault_path.join("Reports").join("Weekly");
+    fs::create_dir_all(&report_dir)?;
+    let report_path = report_dir.join(format!("{date_str}.md"));
+
+    let mut markdown = String::new();
+    markdown.push_str(&format!("# Weekly Report {date_str}\n\n"));
+    markdown.push_str(&format!("Window: {window_start} to {window_end} UTC\n\n"));
+    markdown.push_str(&format!("Total artifacts: {}\n\n", artifacts.len()));
+    for artifact in &artifacts {
+        let title = artifact
+            .title
+            .as_deref()
+            .unwrap_or("(untitled)")
+            .replace('\n', " ");
+        markdown.push_str(&format!(
+            "- [{title}]({}) — {}\n",
+            artifact.source_value, artifact.retrieved_at
+        ));
+    }
+    fs::write(&report_path, markdown)?;
+
+    let report_json_dir = storage
+        .out_dir
+        .join("reports")
+        .join("weekly");
+    fs::create_dir_all(&report_json_dir)?;
+    let report_json_path = report_json_dir.join(format!("{date_str}.json"));
+    let json_payload = serde_json::json!({
+        "date": date_str,
+        "window_start": window_start,
+        "window_end": window_end,
+        "total": artifacts.len(),
+        "artifacts": artifacts.iter().map(|artifact| {
+            serde_json::json!({
+                "id": artifact.id,
+                "title": artifact.title,
+                "retrieved_at": artifact.retrieved_at,
+                "source_value": artifact.source_value,
+            })
+        }).collect::<Vec<_>>()
+    });
+    fs::write(&report_json_path, serde_json::to_string_pretty(&json_payload)?)?;
+
+    println!("Weekly report written to {}", report_path.display());
+    Ok(())
+}
+
+struct ReportArtifactRow {
+    id: String,
+    title: Option<String>,
+    retrieved_at: String,
+    source_value: String,
 }
