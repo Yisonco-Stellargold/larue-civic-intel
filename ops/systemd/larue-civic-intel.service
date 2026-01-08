@@ -1,0 +1,10 @@
+[Unit]
+Description=LaRue Civic Intel weekly pipeline
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/larue-civic-intel
+ExecStart=/usr/bin/env bash -lc 'python workers/collectors/ky_public_notice_larue.py && cargo run -p cli -- ingest-dir out/artifacts --db civic.db && cargo run -p cli -- build-vault --db civic.db --vault vault'
+

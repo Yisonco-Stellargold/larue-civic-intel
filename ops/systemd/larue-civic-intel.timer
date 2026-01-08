@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly LaRue Civic Intel pipeline
+
+[Timer]
+OnCalendar=Mon *-*-* 02:00:00
+Persistent=true
+Unit=larue-civic-intel.service
+
+[Install]
+WantedBy=timers.target

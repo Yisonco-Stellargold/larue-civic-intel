@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use schemars::schema_for;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "larue")]
@@ -33,6 +33,15 @@ enum Commands {
     IngestMeeting {
         /// Path to a meeting JSON file matching the canonical schema
         meeting_json: PathBuf,
+
+        /// SQLite DB path
+        #[arg(long, default_value = "civic.db")]
+        db: String,
+    },
+    /// Ingest all Artifact JSON files from a directory into SQLite
+    IngestDir {
+        /// Directory containing artifact JSON files
+        dir: PathBuf,
 
         /// SQLite DB path
         #[arg(long, default_value = "civic.db")]
@@ -69,6 +78,7 @@ fn main() -> Result<()> {
         },
         Commands::Ingest { artifact_json, db } => ingest_artifact(artifact_json, &db),
         Commands::IngestMeeting { meeting_json, db } => ingest_meeting(meeting_json, &db),
+        Commands::IngestDir { dir, db } => ingest_dir(dir, &db),
         Commands::BuildVault { db, vault } => build_vault(&db, vault),
 
     }
@@ -124,11 +134,7 @@ fn schema_export(out_dir: PathBuf) -> Result<()> {
 }
 
 fn ingest_artifact(path: PathBuf, db_path: &str) -> Result<()> {
-    let raw = fs::read_to_string(&path)?;
-    let raw_json: serde_json::Value = serde_json::from_str(&raw)?;
-
-    let artifact: civic_core::schema::Artifact =
-        serde_json::from_value(raw_json.clone()).map_err(|e| anyhow!("Schema mismatch: {e}"))?;
+    let (artifact, raw_json) = load_artifact(&path)?;
 
     validate_artifact(&artifact)?;
 
@@ -139,6 +145,64 @@ fn ingest_artifact(path: PathBuf, db_path: &str) -> Result<()> {
         "Ingested artifact id={} into db={}",
         artifact.id,
         db_path
+    );
+    Ok(())
+}
+
+fn ingest_dir(dir: PathBuf, db_path: &str) -> Result<()> {
+    let mut success_count = 0;
+    let mut failure_count = 0;
+    let conn = civic_core::db::open(db_path)?;
+
+    let entries = fs::read_dir(&dir)
+        .map_err(|e| anyhow!("Failed to read directory {}: {e}", dir.display()))?;
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                failure_count += 1;
+                eprintln!("Failed to read directory entry: {e}");
+                continue;
+            }
+        };
+        let path = entry.path();
+        if !is_json_file(&path) {
+            continue;
+        }
+
+        match load_artifact(&path) {
+            Ok((artifact, raw_json)) => {
+                if let Err(e) = validate_artifact(&artifact) {
+                    failure_count += 1;
+                    eprintln!("Validation failed for {}: {e}", path.display());
+                    continue;
+                }
+                match civic_core::db::upsert_artifact(&conn, &artifact, &raw_json) {
+                    Ok(()) => {
+                        success_count += 1;
+                        println!(
+                            "Ingested artifact id={} from {}",
+                            artifact.id,
+                            path.display()
+                        );
+                    }
+                    Err(e) => {
+                        failure_count += 1;
+                        eprintln!("Failed to ingest {}: {e}", path.display());
+                    }
+                }
+            }
+            Err(e) => {
+                failure_count += 1;
+                eprintln!("Failed to parse {}: {e}", path.display());
+            }
+        }
+    }
+
+    println!(
+        "Ingest-dir summary: success={}, failed={}",
+        success_count, failure_count
     );
     Ok(())
 }
@@ -157,6 +221,21 @@ fn ingest_meeting(path: PathBuf, db_path: &str) -> Result<()> {
 
     println!("Ingested meeting id={} into db={}", meeting.id, db_path);
     Ok(())
+}
+
+fn load_artifact(path: &Path) -> Result<(civic_core::schema::Artifact, serde_json::Value)> {
+    let raw = fs::read_to_string(path)?;
+    let raw_json: serde_json::Value = serde_json::from_str(&raw)?;
+    let artifact: civic_core::schema::Artifact =
+        serde_json::from_value(raw_json.clone()).map_err(|e| anyhow!("Schema mismatch: {e}"))?;
+    Ok((artifact, raw_json))
+}
+
+fn is_json_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("json"))
+        .unwrap_or(false)
 }
 
 // Keep validation lightweight for v1; expand later.
