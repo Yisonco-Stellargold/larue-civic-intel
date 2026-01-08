@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Motion",
+  "type": "object",
+  "required": [
+    "id",
+    "meeting_id",
+    "title",
+    "votes"
+  ],
+  "properties": {
+    "description": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "id": {
+      "type": "string"
+    },
+    "meeting_id": {
+      "type": "string"
+    },
+    "result": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "title": {
+      "type": "string"
+    },
+    "votes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Vote"
+      }
+    }
+  },
+  "definitions": {
+    "Vote": {
+      "type": "object",
+      "required": [
+        "motion_id",
+        "official_id",
+        "value"
+      ],
+      "properties": {
+        "motion_id": {
+          "type": "string"
+        },
+        "official_id": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

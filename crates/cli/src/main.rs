@@ -29,7 +29,16 @@ enum Commands {
         #[arg(long, default_value = "civic.db")]
         db: String,
     },
-        /// Build/update an Obsidian vault from the SQLite database
+    /// Ingest a single Meeting JSON file into SQLite
+    IngestMeeting {
+        /// Path to a meeting JSON file matching the canonical schema
+        meeting_json: PathBuf,
+
+        /// SQLite DB path
+        #[arg(long, default_value = "civic.db")]
+        db: String,
+    },
+    /// Build/update an Obsidian vault from the SQLite database
     BuildVault {
         /// SQLite DB path
         #[arg(long, default_value = "civic.db")]
@@ -59,6 +68,7 @@ fn main() -> Result<()> {
             SchemaCommands::Export { out_dir } => schema_export(out_dir),
         },
         Commands::Ingest { artifact_json, db } => ingest_artifact(artifact_json, &db),
+        Commands::IngestMeeting { meeting_json, db } => ingest_meeting(meeting_json, &db),
         Commands::BuildVault { db, vault } => build_vault(&db, vault),
 
     }
@@ -77,6 +87,36 @@ fn schema_export(out_dir: PathBuf) -> Result<()> {
     fs::write(
         out_dir.join("SourceRef.schema.json"),
         serde_json::to_string_pretty(&source_schema)?,
+    )?;
+
+    let body_schema = schema_for!(civic_core::schema::Body);
+    fs::write(
+        out_dir.join("Body.schema.json"),
+        serde_json::to_string_pretty(&body_schema)?,
+    )?;
+
+    let official_schema = schema_for!(civic_core::schema::Official);
+    fs::write(
+        out_dir.join("Official.schema.json"),
+        serde_json::to_string_pretty(&official_schema)?,
+    )?;
+
+    let meeting_schema = schema_for!(civic_core::schema::Meeting);
+    fs::write(
+        out_dir.join("Meeting.schema.json"),
+        serde_json::to_string_pretty(&meeting_schema)?,
+    )?;
+
+    let motion_schema = schema_for!(civic_core::schema::Motion);
+    fs::write(
+        out_dir.join("Motion.schema.json"),
+        serde_json::to_string_pretty(&motion_schema)?,
+    )?;
+
+    let vote_schema = schema_for!(civic_core::schema::Vote);
+    fs::write(
+        out_dir.join("Vote.schema.json"),
+        serde_json::to_string_pretty(&vote_schema)?,
     )?;
 
     println!("Exported schemas to {}", out_dir.display());
@@ -103,6 +143,22 @@ fn ingest_artifact(path: PathBuf, db_path: &str) -> Result<()> {
     Ok(())
 }
 
+fn ingest_meeting(path: PathBuf, db_path: &str) -> Result<()> {
+    let raw = fs::read_to_string(&path)?;
+    let raw_json: serde_json::Value = serde_json::from_str(&raw)?;
+
+    let meeting: civic_core::schema::Meeting =
+        serde_json::from_value(raw_json.clone()).map_err(|e| anyhow!("Schema mismatch: {e}"))?;
+
+    validate_meeting(&meeting)?;
+
+    let mut conn = civic_core::db::open(db_path)?;
+    civic_core::db::upsert_meeting_with_children(&mut conn, &meeting, &raw_json)?;
+
+    println!("Ingested meeting id={} into db={}", meeting.id, db_path);
+    Ok(())
+}
+
 // Keep validation lightweight for v1; expand later.
 fn validate_artifact(a: &civic_core::schema::Artifact) -> Result<()> {
     if a.id.trim().is_empty() {
@@ -116,6 +172,60 @@ fn validate_artifact(a: &civic_core::schema::Artifact) -> Result<()> {
     }
     if a.source.retrieved_at.trim().is_empty() {
         return Err(anyhow!("Artifact.source.retrieved_at must not be empty"));
+    }
+    Ok(())
+}
+
+fn validate_meeting(m: &civic_core::schema::Meeting) -> Result<()> {
+    if m.id.trim().is_empty() {
+        return Err(anyhow!("Meeting.id must not be empty"));
+    }
+    if m.body_id.trim().is_empty() {
+        return Err(anyhow!("Meeting.body_id must not be empty"));
+    }
+    if m.started_at.trim().is_empty() {
+        return Err(anyhow!("Meeting.started_at must not be empty"));
+    }
+    for artifact_id in &m.artifact_ids {
+        if artifact_id.trim().is_empty() {
+            return Err(anyhow!("Meeting.artifact_ids must not contain empty values"));
+        }
+    }
+    for motion in &m.motions {
+        if motion.id.trim().is_empty() {
+            return Err(anyhow!("Motion.id must not be empty"));
+        }
+        if motion.meeting_id.trim().is_empty() {
+            return Err(anyhow!("Motion.meeting_id must not be empty"));
+        }
+        if motion.meeting_id != m.id {
+            return Err(anyhow!(
+                "Motion.meeting_id {} does not match Meeting.id {}",
+                motion.meeting_id,
+                m.id
+            ));
+        }
+        if motion.title.trim().is_empty() {
+            return Err(anyhow!("Motion.title must not be empty"));
+        }
+        for vote in &motion.votes {
+            if vote.motion_id.trim().is_empty() {
+                return Err(anyhow!("Vote.motion_id must not be empty"));
+            }
+            if vote.motion_id != motion.id {
+                return Err(anyhow!(
+                    "Vote.motion_id {} does not match Motion.id {}",
+                    vote.motion_id,
+                    motion.id
+                ));
+            }
+            if vote.official_id.trim().is_empty() {
+                return Err(anyhow!("Vote.official_id must not be empty"));
+            }
+            if vote.value.trim().is_empty() {
+                return Err(anyhow!("Vote.value must not be empty"));
+            }
+        }
     }
     Ok(())
 }

@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Body",
+  "type": "object",
+  "required": [
+    "id",
+    "jurisdiction",
+    "kind",
+    "name"
+  ],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "jurisdiction": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    }
+  }
+}

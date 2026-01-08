@@ -1,0 +1,100 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Meeting",
+  "type": "object",
+  "required": [
+    "artifact_ids",
+    "body_id",
+    "id",
+    "motions",
+    "started_at"
+  ],
+  "properties": {
+    "artifact_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "body_id": {
+      "type": "string"
+    },
+    "ended_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "id": {
+      "type": "string"
+    },
+    "motions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Motion"
+      }
+    },
+    "started_at": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "Motion": {
+      "type": "object",
+      "required": [
+        "id",
+        "meeting_id",
+        "title",
+        "votes"
+      ],
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "meeting_id": {
+          "type": "string"
+        },
+        "result": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "votes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Vote"
+          }
+        }
+      }
+    },
+    "Vote": {
+      "type": "object",
+      "required": [
+        "motion_id",
+        "official_id",
+        "value"
+      ],
+      "properties": {
+        "motion_id": {
+          "type": "string"
+        },
+        "official_id": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Official",
+  "type": "object",
+  "required": [
+    "full_name",
+    "id"
+  ],
+  "properties": {
+    "full_name": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string"
+    }
+  }
+}
