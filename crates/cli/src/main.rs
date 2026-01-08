@@ -4,6 +4,7 @@ use schemars::schema_for;
 use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use time::format_description::well_known::Rfc3339;
 use time::format_description::FormatItem;
 use time::{Duration, OffsetDateTime};
@@ -45,6 +46,15 @@ enum Commands {
         /// SQLite DB path
         #[arg(long)]
         db: Option<String>,
+    },
+    /// Ingest a single Meeting JSON file into SQLite
+    IngestMeeting {
+        /// Path to a meeting JSON file matching the canonical schema
+        meeting_json: PathBuf,
+
+        /// SQLite DB path
+        #[arg(long, default_value = "civic.db")]
+        db: String,
     },
     /// Build/update an Obsidian vault from the SQLite database
     BuildVault {
@@ -98,6 +108,7 @@ fn main() -> Result<()> {
             let db_path = db.unwrap_or(storage.db_path);
             ingest_dir(dir, &db_path)
         }
+        Commands::IngestMeeting { meeting_json, db } => ingest_meeting(meeting_json, &db),
         Commands::BuildVault { config, db, vault } => {
             let config = config.as_ref().map(load_config).transpose()?;
             let storage = resolve_storage(config.as_ref());
@@ -113,6 +124,7 @@ fn main() -> Result<()> {
 #[derive(Debug, Deserialize)]
 struct Config {
     storage: Option<StorageConfig>,
+    sources: Option<SourcesConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +132,17 @@ struct StorageConfig {
     db_path: Option<String>,
     vault_path: Option<String>,
     out_dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SourcesConfig {
+    larue_fiscal_court: Option<SourceConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SourceConfig {
+    enabled: Option<bool>,
+    base_url: Option<String>,
 }
 
 #[derive(Debug)]
@@ -166,6 +189,18 @@ fn schema_export(out_dir: PathBuf) -> Result<()> {
     fs::write(
         out_dir.join("SourceRef.schema.json"),
         serde_json::to_string_pretty(&source_schema)?,
+    )?;
+
+    let body_schema = schema_for!(civic_core::schema::Body);
+    fs::write(
+        out_dir.join("Body.schema.json"),
+        serde_json::to_string_pretty(&body_schema)?,
+    )?;
+
+    let meeting_schema = schema_for!(civic_core::schema::Meeting);
+    fs::write(
+        out_dir.join("Meeting.schema.json"),
+        serde_json::to_string_pretty(&meeting_schema)?,
     )?;
 
     println!("Exported schemas to {}", out_dir.display());
@@ -272,6 +307,31 @@ fn ingest_dir(dir: PathBuf, db_path: &str) -> Result<()> {
     Ok(())
 }
 
+fn ingest_meeting(path: PathBuf, db_path: &str) -> Result<()> {
+    let raw = fs::read_to_string(&path)?;
+    let raw_json: serde_json::Value = serde_json::from_str(&raw)?;
+    let meeting: civic_core::schema::Meeting =
+        serde_json::from_value(raw_json.clone()).map_err(|e| anyhow!("Schema mismatch: {e}"))?;
+    validate_meeting(&meeting)?;
+    let conn = civic_core::db::open(db_path)?;
+    civic_core::db::upsert_meeting(&conn, &meeting, &raw_json)?;
+    println!("Ingested meeting id={} into db={}", meeting.id, db_path);
+    Ok(())
+}
+
+fn validate_meeting(meeting: &civic_core::schema::Meeting) -> Result<()> {
+    if meeting.id.trim().is_empty() {
+        return Err(anyhow!("Meeting.id must not be empty"));
+    }
+    if meeting.body_id.trim().is_empty() {
+        return Err(anyhow!("Meeting.body_id must not be empty"));
+    }
+    if meeting.started_at.trim().is_empty() {
+        return Err(anyhow!("Meeting.started_at must not be empty"));
+    }
+    Ok(())
+}
+
 fn ingest_artifact_json(
     conn: &rusqlite::Connection,
     raw_json: serde_json::Value,
@@ -282,6 +342,82 @@ fn ingest_artifact_json(
     validate_artifact(&artifact)?;
     civic_core::db::upsert_artifact(conn, &artifact, &raw_json)?;
     Ok(artifact.id)
+}
+
+fn ingest_meeting_dir(dir: PathBuf, db_path: &str) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    let conn = civic_core::db::open(db_path)?;
+    let mut ingested = 0usize;
+    let mut failed = 0usize;
+    let mut skipped = 0usize;
+
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            skipped += 1;
+            continue;
+        }
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                failed += 1;
+                eprintln!("Failed to read meeting {}: {err}", path.display());
+                continue;
+            }
+        };
+        let raw_json: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(raw_json) => raw_json,
+            Err(err) => {
+                failed += 1;
+                eprintln!("Failed to parse meeting {}: {err}", path.display());
+                continue;
+            }
+        };
+        let meeting_id = match raw_json.get("id").and_then(|value| value.as_str()) {
+            Some(value) => value,
+            None => {
+                failed += 1;
+                eprintln!("Missing meeting id in {}", path.display());
+                continue;
+            }
+        };
+        if civic_core::db::meeting_exists(&conn, meeting_id)? {
+            skipped += 1;
+            continue;
+        }
+        let meeting: civic_core::schema::Meeting = match serde_json::from_value(raw_json.clone()) {
+            Ok(meeting) => meeting,
+            Err(err) => {
+                failed += 1;
+                eprintln!("Meeting schema mismatch in {}: {err}", path.display());
+                continue;
+            }
+        };
+        if let Err(err) = validate_meeting(&meeting) {
+            failed += 1;
+            eprintln!("Meeting validation failed in {}: {err}", path.display());
+            continue;
+        }
+        if let Err(err) = civic_core::db::upsert_meeting(&conn, &meeting, &raw_json) {
+            failed += 1;
+            eprintln!("Failed to ingest meeting {}: {err}", path.display());
+            continue;
+        }
+        ingested += 1;
+    }
+
+    println!(
+        "Ingested {} meetings, {} failed, {} skipped in {}",
+        ingested,
+        failed,
+        skipped,
+        dir.display()
+    );
+    Ok(())
 }
 
 // Build/update an Obsidian vault from the sqlite database. Will be expanded further.
@@ -296,7 +432,7 @@ fn run_weekly(config_path: PathBuf) -> Result<()> {
     let config = load_config(&config_path)?;
     let storage = resolve_storage(Some(&config));
 
-    let output = std::process::Command::new("python")
+    let output = Command::new("python")
         .arg("workers/collectors/ky_public_notice_larue.py")
         .arg("--config")
         .arg(&config_path)
@@ -317,8 +453,133 @@ fn run_weekly(config_path: PathBuf) -> Result<()> {
 
     let artifacts_dir = storage.out_dir.join("artifacts");
     ingest_dir(artifacts_dir, &storage.db_path)?;
+
+    if fiscal_court_enabled(&config) {
+        run_fiscal_court_collector(&config_path)?;
+        let artifacts_dir = storage.out_dir.join("artifacts");
+        ingest_dir(artifacts_dir.clone(), &storage.db_path)?;
+        parse_meetings(&storage, artifacts_dir)?;
+        let meetings_dir = storage.out_dir.join("meetings");
+        ingest_meeting_dir(meetings_dir, &storage.db_path)?;
+    }
+
     build_vault(&storage.db_path, storage.vault_path)?;
     report_weekly(config_path)?;
+    Ok(())
+}
+
+fn fiscal_court_enabled(config: &Config) -> bool {
+    config
+        .sources
+        .as_ref()
+        .and_then(|sources| sources.larue_fiscal_court.as_ref())
+        .and_then(|source| source.enabled)
+        .unwrap_or(false)
+}
+
+fn run_fiscal_court_collector(config_path: &PathBuf) -> Result<()> {
+    let output = Command::new("python")
+        .arg("workers/collectors/larue_fiscal_court_agendas.py")
+        .arg("--config")
+        .arg(config_path)
+        .output()?;
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("Fiscal court collector failed with status {}", output.status);
+        if !stdout.is_empty() {
+            eprintln!("Collector stdout:\n{stdout}");
+        }
+        if !stderr.is_empty() {
+            eprintln!("Collector stderr:\n{stderr}");
+        }
+        return Err(anyhow!("Fiscal court collector exited with failure"));
+    }
+    Ok(())
+}
+
+fn parse_meetings(storage: &ResolvedStorage, artifacts_dir: PathBuf) -> Result<()> {
+    let snapshots_dir = storage.out_dir.join("snapshots");
+    let meetings_dir = storage.out_dir.join("meetings");
+    fs::create_dir_all(&meetings_dir)?;
+
+    let mut snapshot_map = std::collections::HashMap::new();
+    if snapshots_dir.exists() {
+        for entry in fs::read_dir(&snapshots_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
+                snapshot_map.insert(stem.to_string(), path);
+            }
+        }
+    }
+
+    if !artifacts_dir.exists() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(&artifacts_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let raw = fs::read_to_string(&path)?;
+        let raw_json: serde_json::Value = serde_json::from_str(&raw)?;
+        let tags = raw_json
+            .get("tags")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let tag_set: Vec<String> = tags
+            .iter()
+            .filter_map(|value| value.as_str().map(|s| s.to_string()))
+            .collect();
+        if !tag_set.iter().any(|tag| tag == "meeting")
+            || !tag_set.iter().any(|tag| tag == "fiscal_court")
+        {
+            continue;
+        }
+
+        let stem = match path.file_stem().and_then(|value| value.to_str()) {
+            Some(stem) => stem.to_string(),
+            None => continue,
+        };
+        let snapshot_path = match snapshot_map.get(&stem) {
+            Some(path) => path,
+            None => {
+                eprintln!("Missing snapshot for artifact {}", path.display());
+                continue;
+            }
+        };
+
+        let output = Command::new("python")
+            .arg("workers/parsers/parse_meeting_minutes.py")
+            .arg("--artifact")
+            .arg(&path)
+            .arg("--snapshot")
+            .arg(snapshot_path)
+            .arg("--out-dir")
+            .arg(&storage.out_dir)
+            .output()?;
+
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!(
+                "Meeting parser failed for {} with status {}",
+                path.display(),
+                output.status
+            );
+            if !stdout.is_empty() {
+                eprintln!("Parser stdout:\n{stdout}");
+            }
+            if !stderr.is_empty() {
+                eprintln!("Parser stderr:\n{stderr}");
+            }
+        }
+    }
     Ok(())
 }
 

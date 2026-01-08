@@ -14,9 +14,9 @@ query = "Larue"
 tags = ["public_notice","larue","ky"]
 # optional: base_url override if needed later
 
-[sources.fiscal_court]
+[sources.larue_fiscal_court]
 enabled = false
-base_url = ""
+base_url = "https://www.laruecounty.org/fiscal-court"
 
 [sources.school_board]
 enabled = false
