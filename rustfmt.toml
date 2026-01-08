@@ -1,0 +1,4 @@
+cat <<'EOF' > rustfmt.toml
+edition = "2021"
+max_width = 100
+EOF
