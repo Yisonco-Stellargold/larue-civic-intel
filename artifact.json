@@ -1,0 +1,12 @@
+{
+  "id": "demo-001",
+  "source": {
+    "kind": "url",
+    "value": "https://example.com/demo",
+    "retrieved_at": "2026-01-08T00:00:00Z"
+  },
+  "title": "Demo Artifact",
+  "body_text": "This is a test artifact used to verify ingestion.",
+  "content_type": "text/html",
+  "tags": ["demo", "test"]
+}
