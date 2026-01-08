@@ -29,6 +29,16 @@ enum Commands {
         #[arg(long, default_value = "civic.db")]
         db: String,
     },
+        /// Build/update an Obsidian vault from the SQLite database
+    BuildVault {
+        /// SQLite DB path
+        #[arg(long, default_value = "civic.db")]
+        db: String,
+
+        /// Vault root directory
+        #[arg(long, default_value = "vault")]
+        vault: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -49,6 +59,8 @@ fn main() -> Result<()> {
             SchemaCommands::Export { out_dir } => schema_export(out_dir),
         },
         Commands::Ingest { artifact_json, db } => ingest_artifact(artifact_json, &db),
+        Commands::BuildVault { db, vault } => build_vault(&db, vault),
+
     }
 }
 
@@ -105,5 +117,13 @@ fn validate_artifact(a: &civic_core::schema::Artifact) -> Result<()> {
     if a.source.retrieved_at.trim().is_empty() {
         return Err(anyhow!("Artifact.source.retrieved_at must not be empty"));
     }
+    Ok(())
+}
+
+// Build/update an Obsidian vault from the sqlite database. Will be expanded further.
+fn build_vault(db_path: &str, vault: PathBuf) -> Result<()> {
+    let conn = civic_core::db::open(db_path)?;
+    obsidian::vault::build_vault(&conn, &vault)?;
+    println!("Vault updated at {}", vault.display());
     Ok(())
 }
