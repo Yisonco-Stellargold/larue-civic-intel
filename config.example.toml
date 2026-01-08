@@ -21,8 +21,12 @@ base_url = "https://www.laruecounty.org/fiscal-court"
 [sources.wayback]
 enabled = false
 urls = ["https://www.laruecounty.ky.gov/", "http://www.laruecountyherald.com/"]
+include_subpaths = false
 rate_limit_seconds = 1.0
 limit_per_run = 200
+
+[importance]
+high_impact_url_keywords = ["zoning","ordinance","minutes","agenda","budget","tax","contract","bid","election"]
 
 [sources.school_board]
 enabled = false

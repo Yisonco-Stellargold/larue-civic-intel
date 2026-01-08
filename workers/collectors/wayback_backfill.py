@@ -40,19 +40,22 @@ def get_nested(config: dict, *keys, default=None):
 
 def load_state(path: Path) -> dict:
     if not path.exists():
-        return {"last_processed": {}, "seen_ids": []}
+        return {"last_processed": {}, "seen_ids": [], "last_seen": {}}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
-        return {"last_processed": {}, "seen_ids": []}
+        return {"last_processed": {}, "seen_ids": [], "last_seen": {}}
     if not isinstance(data, dict):
-        return {"last_processed": {}, "seen_ids": []}
+        return {"last_processed": {}, "seen_ids": [], "last_seen": {}}
     data.setdefault("last_processed", {})
     data.setdefault("seen_ids", [])
+    data.setdefault("last_seen", {})
     if not isinstance(data["last_processed"], dict):
         data["last_processed"] = {}
     if not isinstance(data["seen_ids"], list):
         data["seen_ids"] = []
+    if not isinstance(data["last_seen"], dict):
+        data["last_seen"] = {}
     return data
 
 
@@ -64,8 +67,15 @@ def save_state(path: Path, state: dict) -> None:
 
 
 def stable_id(original_url: str, timestamp: str) -> str:
-    digest = hashlib.sha256(f"{original_url}|{timestamp}".encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(f"{original_url}|{timestamp}".encode("utf-8")).hexdigest()[:16]
     return f"wayback:{digest}"
+
+
+def change_id(original_url: str, previous_ts: str, current_ts: str) -> str:
+    digest = hashlib.sha256(
+        f"{original_url}|{previous_ts}|{current_ts}".encode("utf-8")
+    ).hexdigest()[:16]
+    return f"wayback-change:{digest}"
 
 
 def archived_url(original_url: str, timestamp: str) -> str:
@@ -76,20 +86,30 @@ def determine_extension(content_type: str, fallback_url: str) -> str:
     if not content_type:
         parsed = urlparse(fallback_url)
         suffix = Path(parsed.path).suffix
-        return suffix or ".bin"
+        return suffix or ".html"
     mime = content_type.split(";")[0].strip().lower()
-    return CONTENT_TYPE_EXTENSIONS.get(mime, Path(urlparse(fallback_url).path).suffix or ".bin")
+    return CONTENT_TYPE_EXTENSIONS.get(mime, Path(urlparse(fallback_url).path).suffix or ".html")
 
 
-def derive_tags(urls: list[str], original_url: str) -> list[str]:
+def derive_tags(urls: list[str], original_url: str, keywords: list[str]) -> list[str]:
     tags = ["wayback", "history"]
     lowered = original_url.lower()
     if any("larue" in url.lower() for url in urls) or "larue" in lowered:
         tags.append("larue")
+    for keyword in keywords:
+        if keyword.lower() in lowered:
+            tags.append("high_impact")
+            break
     return tags
 
 
-def cdx_query(url: str, start: str | None, end: str | None, limit: int) -> list[dict[str, Any]]:
+def cdx_query(
+    url: str,
+    start: str | None,
+    end: str | None,
+    limit: int,
+    sort: str | None = None,
+) -> list[dict[str, Any]]:
     params = [
         f"url={quote(url)}",
         "output=json",
@@ -98,6 +118,8 @@ def cdx_query(url: str, start: str | None, end: str | None, limit: int) -> list[
         "collapse=digest",
         f"limit={limit}",
     ]
+    if sort:
+        params.append(f"sort={sort}")
     if start:
         params.append(f"from={start}")
     if end:
@@ -119,9 +141,27 @@ def cdx_query(url: str, start: str | None, end: str | None, limit: int) -> list[
 def download_snapshot(url: str, destination: Path) -> str:
     request = Request(url, headers={"User-Agent": "larue-civic-intel/1.0"})
     with urlopen(request) as response:
-        content_type = response.headers.get("Content-Type", "")
+        content_type = response.headers.get("Content-Type", "text/html")
         destination.write_bytes(response.read())
     return content_type
+
+
+def snapshot_from_disk(artifact_id: str, snapshots_dir: Path) -> Path | None:
+    matches = list(snapshots_dir.glob(f"{artifact_id}.*"))
+    if matches:
+        return matches[0]
+    return None
+
+
+def hash_snapshot(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(8192)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
 def run() -> None:
@@ -134,12 +174,11 @@ def run() -> None:
     args = parser.parse_args()
 
     config = read_config(args.config)
-    enabled = get_nested(config, "sources", "wayback", "enabled", default=False)
-    if not enabled:
-        return
-
     out_dir_value = get_nested(config, "storage", "out_dir", default=DEFAULT_OUT_DIR)
     urls = get_nested(config, "sources", "wayback", "urls", default=[])
+    include_subpaths = get_nested(
+        config, "sources", "wayback", "include_subpaths", default=False
+    )
     rate_limit = float(
         get_nested(
             config,
@@ -161,6 +200,10 @@ def run() -> None:
     if args.limit is not None:
         limit_per_run = args.limit
 
+    keywords = get_nested(config, "importance", "high_impact_url_keywords", default=[])
+    if not isinstance(keywords, list):
+        keywords = []
+
     out_dir = Path(out_dir_value)
     artifacts_dir = out_dir / "artifacts"
     snapshots_dir = out_dir / "snapshots" / "wayback"
@@ -169,10 +212,16 @@ def run() -> None:
     snapshots_dir.mkdir(parents=True, exist_ok=True)
     state_dir.mkdir(parents=True, exist_ok=True)
 
+    enabled = get_nested(config, "sources", "wayback", "enabled", default=False)
+    if not enabled:
+        print("Wayback backfill disabled in config.")
+        return
+
     state_path = state_dir / STATE_FILENAME
     state = load_state(state_path)
     seen_ids: list[str] = state.get("seen_ids", [])
     last_processed: dict[str, str] = state.get("last_processed", {})
+    last_seen: dict[str, dict[str, str]] = state.get("last_seen", {})
 
     if not isinstance(urls, list) or not urls:
         print("No Wayback URLs configured.")
@@ -191,7 +240,7 @@ def run() -> None:
             continue
 
         query_url = base_url
-        if base_url.endswith("/"):
+        if include_subpaths:
             query_url = f"{base_url}*"
 
         start = args.start
@@ -213,7 +262,7 @@ def run() -> None:
                 continue
 
             snapshot_url = archived_url(original_url, timestamp)
-            snapshot_ext = ".bin"
+            snapshot_ext = ".html"
             snapshot_path = snapshots_dir / f"{artifact_id}{snapshot_ext}"
             content_type = ""
             try:
@@ -239,8 +288,8 @@ def run() -> None:
                 },
                 "title": f"Wayback snapshot: {original_url} @ {timestamp}",
                 "body_text": None,
-                "content_type": content_type.split(";")[0] if content_type else None,
-                "tags": derive_tags(urls, original_url),
+                "content_type": content_type.split(";")[0] if content_type else "text/html",
+                "tags": derive_tags(urls, original_url, keywords),
             }
             artifact_path = artifacts_dir / f"{artifact_id}.json"
             artifact_path.write_text(
@@ -256,8 +305,73 @@ def run() -> None:
                 break
             time.sleep(rate_limit)
 
+        newest = cdx_query(query_url, None, None, 1, sort="desc")
+        if newest:
+            newest_capture = newest[0]
+            newest_timestamp = newest_capture.get("timestamp", "")
+            newest_original = newest_capture.get("original", base_url)
+            if newest_timestamp and newest_original:
+                newest_id = stable_id(newest_original, newest_timestamp)
+                existing_snapshot = snapshot_from_disk(newest_id, snapshots_dir)
+                if existing_snapshot is None:
+                    snapshot_url = archived_url(newest_original, newest_timestamp)
+                    snapshot_path = snapshots_dir / f"{newest_id}.html"
+                    content_type = ""
+                    try:
+                        content_type = download_snapshot(snapshot_url, snapshot_path)
+                        snapshot_ext = determine_extension(content_type, newest_original)
+                        if snapshot_path.suffix != snapshot_ext:
+                            final_path = snapshot_path.with_suffix(snapshot_ext)
+                            snapshot_path.rename(final_path)
+                            snapshot_path = final_path
+                    except Exception as exc:
+                        print(f"Failed to download {snapshot_url}: {exc}")
+                        continue
+                    existing_snapshot = snapshot_path
+                current_hash = hash_snapshot(existing_snapshot)
+                previous = last_seen.get(base_url, {})
+                previous_hash = previous.get("hash", "")
+                previous_ts = previous.get("timestamp", "")
+                if previous_hash and current_hash != previous_hash:
+                    change_artifact_id = change_id(
+                        newest_original, previous_ts, newest_timestamp
+                    )
+                    if change_artifact_id not in seen_ids:
+                        snapshot_url = archived_url(newest_original, newest_timestamp)
+                        previous_url = archived_url(newest_original, previous_ts)
+                        retrieved_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
+                            "+00:00", "Z"
+                        )
+                        change_artifact = {
+                            "id": change_artifact_id,
+                            "source": {
+                                "kind": "wayback",
+                                "value": snapshot_url,
+                                "retrieved_at": retrieved_at,
+                            },
+                            "title": f"Wayback change detected: {newest_original}",
+                            "body_text": (
+                                f"{previous_ts} -> {newest_timestamp}\\n"
+                                f"previous: {previous_url}\\n"
+                                f"current: {snapshot_url}"
+                            ),
+                            "content_type": "text/plain",
+                            "tags": ["wayback", "change"],
+                        }
+                        artifact_path = artifacts_dir / f"{change_artifact_id}.json"
+                        artifact_path.write_text(
+                            json.dumps(change_artifact, indent=2, sort_keys=True) + "\\n",
+                            encoding="utf-8",
+                        )
+                        seen_ids.append(change_artifact_id)
+                last_seen[base_url] = {
+                    "hash": current_hash,
+                    "timestamp": newest_timestamp,
+                }
+
     state["seen_ids"] = seen_ids
     state["last_processed"] = last_processed
+    state["last_seen"] = last_seen
     save_state(state_path, state)
 
     print(

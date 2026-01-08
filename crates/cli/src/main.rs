@@ -126,6 +126,7 @@ fn main() -> Result<()> {
 struct Config {
     storage: Option<StorageConfig>,
     sources: Option<SourcesConfig>,
+    importance: Option<ImportanceConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,12 +139,18 @@ struct StorageConfig {
 #[derive(Debug, Deserialize)]
 struct SourcesConfig {
     larue_fiscal_court: Option<SourceConfig>,
+    wayback: Option<SourceConfig>,
 }
 
 #[derive(Debug, Deserialize)]
 struct SourceConfig {
     enabled: Option<bool>,
     base_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImportanceConfig {
+    high_impact_url_keywords: Option<Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -503,13 +510,18 @@ fn run_weekly(config_path: PathBuf) -> Result<()> {
         return Err(anyhow!("Collector exited with failure"));
     }
 
-    let artifacts_dir = storage.out_dir.join("artifacts");
-    ingest_dir(artifacts_dir, &storage.db_path)?;
-
     if fiscal_court_enabled(&config) {
         run_fiscal_court_collector(&python, &config_path)?;
-        let artifacts_dir = storage.out_dir.join("artifacts");
-        ingest_dir(artifacts_dir.clone(), &storage.db_path)?;
+    }
+
+    if wayback_enabled(&config) {
+        run_wayback_collector(&python, &config_path)?;
+    }
+
+    let artifacts_dir = storage.out_dir.join("artifacts");
+    ingest_dir(artifacts_dir.clone(), &storage.db_path)?;
+
+    if fiscal_court_enabled(&config) {
         parse_meetings(&python, &storage, artifacts_dir)?;
         let meetings_dir = storage.out_dir.join("meetings");
         ingest_meeting_dir(meetings_dir, &storage.db_path)?;
@@ -525,6 +537,15 @@ fn fiscal_court_enabled(config: &Config) -> bool {
         .sources
         .as_ref()
         .and_then(|sources| sources.larue_fiscal_court.as_ref())
+        .and_then(|source| source.enabled)
+        .unwrap_or(false)
+}
+
+fn wayback_enabled(config: &Config) -> bool {
+    config
+        .sources
+        .as_ref()
+        .and_then(|sources| sources.wayback.as_ref())
         .and_then(|source| source.enabled)
         .unwrap_or(false)
 }
@@ -651,6 +672,36 @@ fn parse_meetings(python: &str, storage: &ResolvedStorage, artifacts_dir: PathBu
     Ok(())
 }
 
+fn run_wayback_collector(python: &str, config_path: &PathBuf) -> Result<()> {
+    let collector_path = Path::new("workers/collectors/wayback_backfill.py");
+    if !collector_path.exists() {
+        return Err(anyhow!(
+            "Collector script not found: {}",
+            collector_path.display()
+        ));
+    }
+
+    let output = Command::new(python)
+        .arg(collector_path)
+        .arg("--config")
+        .arg(config_path)
+        .output()?;
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("Wayback collector failed with status {}", output.status);
+        if !stdout.is_empty() {
+            eprintln!("Collector stdout:\n{stdout}");
+        }
+        if !stderr.is_empty() {
+            eprintln!("Collector stderr:\n{stderr}");
+        }
+        return Err(anyhow!("Wayback collector exited with failure"));
+    }
+    Ok(())
+}
+
 fn find_python_interpreter() -> Result<String> {
     match Command::new("python3").arg("--version").output() {
         Ok(_) => return Ok("python3".to_string()),
@@ -683,7 +734,7 @@ fn report_weekly(config_path: PathBuf) -> Result<()> {
 
     let mut stmt = conn.prepare(
         r#"
-        SELECT id, title, retrieved_at, source_value
+        SELECT id, title, retrieved_at, source_value, tags_json
         FROM artifacts
         WHERE datetime(retrieved_at) >= datetime(?1)
           AND datetime(retrieved_at) <= datetime(?2)
@@ -697,6 +748,7 @@ fn report_weekly(config_path: PathBuf) -> Result<()> {
             title: row.get(1)?,
             retrieved_at: row.get(2)?,
             source_value: row.get(3)?,
+            tags_json: row.get(4)?,
         })
     })?;
 
@@ -712,8 +764,30 @@ fn report_weekly(config_path: PathBuf) -> Result<()> {
     let mut markdown = String::new();
     markdown.push_str(&format!("# Weekly Report {date_str}\n\n"));
     markdown.push_str(&format!("Window: {window_start} to {window_end} UTC\n\n"));
+    let (high_impact, regular): (Vec<_>, Vec<_>) =
+        artifacts.iter().partition(|artifact| artifact.is_high_impact());
+
     markdown.push_str(&format!("Total artifacts: {}\n\n", artifacts.len()));
-    for artifact in &artifacts {
+    markdown.push_str("## High Impact\n\n");
+    if high_impact.is_empty() {
+        markdown.push_str("_No high impact artifacts in this window._\n\n");
+    } else {
+        for artifact in &high_impact {
+            let title = artifact
+                .title
+                .as_deref()
+                .unwrap_or("(untitled)")
+                .replace('\n', " ");
+            markdown.push_str(&format!(
+                "- [{title}]({}) — {}\n",
+                artifact.source_value, artifact.retrieved_at
+            ));
+        }
+        markdown.push('\n');
+    }
+
+    markdown.push_str("## All Artifacts\n\n");
+    for artifact in &regular {
         let title = artifact
             .title
             .as_deref()
@@ -757,4 +831,12 @@ struct ReportArtifactRow {
     title: Option<String>,
     retrieved_at: String,
     source_value: String,
+    tags_json: String,
+}
+
+impl ReportArtifactRow {
+    fn is_high_impact(&self) -> bool {
+        let tags: Vec<String> = serde_json::from_str(&self.tags_json).unwrap_or_default();
+        tags.iter().any(|tag| tag == "high_impact")
+    }
 }

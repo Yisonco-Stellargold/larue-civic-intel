@@ -46,3 +46,6 @@ State is stored in `out/state/wayback_state.json` and records the last processed
 configured URL plus a bounded set of seen capture IDs. Use `--resume` (default) to continue from
 the last processed timestamp, or pass `--start`/`--end` to override the time window. Keep the
 `rate_limit_seconds` setting in config to be a respectful client of the Internet Archive.
+
+Change detection records the latest snapshot hash per URL and emits a separate
+\"Wayback change detected\" artifact when the newest capture differs from the prior run.
