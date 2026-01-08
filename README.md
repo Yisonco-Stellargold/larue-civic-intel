@@ -34,3 +34,15 @@ Run the full weekly pipeline (collector -> ingest-dir -> build-vault) with:
 Generate a weekly report note and JSON summary with:
 
 - `larue report-weekly --config ./config.toml`
+
+## Historical backfill (Wayback Machine)
+
+To backfill archived snapshots, enable the Wayback source in `config.toml` and run the collector
+in batches to respect rate limits:
+
+- `python workers/collectors/wayback_backfill.py --config ./config.toml --limit 200`
+
+State is stored in `out/state/wayback_state.json` and records the last processed timestamp per
+configured URL plus a bounded set of seen capture IDs. Use `--resume` (default) to continue from
+the last processed timestamp, or pass `--start`/`--end` to override the time window. Keep the
+`rate_limit_seconds` setting in config to be a respectful client of the Internet Archive.

@@ -18,6 +18,12 @@ tags = ["public_notice","larue","ky"]
 enabled = false
 base_url = "https://www.laruecounty.org/fiscal-court"
 
+[sources.wayback]
+enabled = false
+urls = ["https://www.laruecounty.ky.gov/", "http://www.laruecountyherald.com/"]
+rate_limit_seconds = 1.0
+limit_per_run = 200
+
 [sources.school_board]
 enabled = false
 base_url = ""
