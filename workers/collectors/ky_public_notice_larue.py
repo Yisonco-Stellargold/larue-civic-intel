@@ -47,14 +47,14 @@ def resolve_settings(config: dict) -> tuple[Path, str, list[str]]:
     return Path(out_dir_value), str(query), tags
 
 
-def write_outputs(out_dir: Path, query: str, tags: list[str]) -> None:
-    artifacts_dir = out_dir / "artifacts"
-    snapshots_dir = out_dir / "snapshots"
-    state_dir = out_dir / "state"
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
-    snapshots_dir.mkdir(parents=True, exist_ok=True)
-    state_dir.mkdir(parents=True, exist_ok=True)
-
+def write_outputs(
+    out_dir: Path,
+    query: str,
+    tags: list[str],
+    artifacts_dir: Path,
+    snapshots_dir: Path,
+    state_dir: Path,
+) -> tuple[int, int, int, int]:
     payload = {"query": query, "tags": tags}
     (artifacts_dir / "ky_public_notice_manifest.json").write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
@@ -67,9 +67,12 @@ def write_outputs(out_dir: Path, query: str, tags: list[str]) -> None:
 
     state_path = state_dir / STATE_FILENAME
     seen_ids = load_state(state_path)
+    if not query.strip():
+        return 0, 0, 0, len(seen_ids)
+
     artifact_id = f"ky_public_notice:{query.lower()}"
     if artifact_id in seen_ids:
-        return
+        return 1, 0, 1, len(seen_ids)
 
     retrieved_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     artifact = {
@@ -91,6 +94,7 @@ def write_outputs(out_dir: Path, query: str, tags: list[str]) -> None:
     )
     seen_ids.append(artifact_id)
     save_state(state_path, seen_ids)
+    return 1, 1, 0, len(seen_ids)
 
 
 def load_state(path: Path) -> list[str]:
@@ -126,7 +130,20 @@ def main() -> None:
         config = read_config(args.config)
 
     out_dir, query, tags = resolve_settings(config)
-    write_outputs(out_dir, query, tags)
+    artifacts_dir = out_dir / "artifacts"
+    snapshots_dir = out_dir / "snapshots"
+    state_dir = out_dir / "state"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    snapshots_dir.mkdir(parents=True, exist_ok=True)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    found, new, skipped, state_size = write_outputs(
+        out_dir, query, tags, artifacts_dir, snapshots_dir, state_dir
+    )
+    if found == 0:
+        print(f"No notices found for query \"{query}\".")
+        print(f"Summary: found={found} new={new} skipped={skipped} state_size={state_size}")
+        return
+    print(f"Summary: found={found} new={new} skipped={skipped} state_size={state_size}")
 
 
 if __name__ == "__main__":

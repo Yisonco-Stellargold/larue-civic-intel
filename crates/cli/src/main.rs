@@ -4,6 +4,7 @@ use schemars::schema_for;
 use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
+use std::path::Path;
 use std::process::Command;
 use time::format_description::well_known::Rfc3339;
 use time::format_description::FormatItem;
@@ -153,8 +154,10 @@ struct ResolvedStorage {
 }
 
 fn load_config(path: &PathBuf) -> Result<Config> {
+    ensure_config_path(path)?;
     let raw = fs::read_to_string(path)?;
     let config = toml::from_str(&raw)?;
+    warn_missing_config_keys(&config);
     Ok(config)
 }
 
@@ -173,6 +176,45 @@ fn resolve_storage(config: Option<&Config>) -> ResolvedStorage {
         db_path,
         vault_path: PathBuf::from(vault_path),
         out_dir: PathBuf::from(out_dir),
+    }
+}
+
+fn ensure_config_path(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Err(anyhow!(
+            "Config file not found: {}. Tip: cp config.example.toml config.toml",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn warn_missing_config_keys(config: &Config) {
+    let mut missing = Vec::new();
+    let storage = config.storage.as_ref();
+    if storage
+        .and_then(|value| value.db_path.as_ref())
+        .is_none()
+    {
+        missing.push("storage.db_path");
+    }
+    if storage
+        .and_then(|value| value.vault_path.as_ref())
+        .is_none()
+    {
+        missing.push("storage.vault_path");
+    }
+    if storage
+        .and_then(|value| value.out_dir.as_ref())
+        .is_none()
+    {
+        missing.push("storage.out_dir");
+    }
+    if !missing.is_empty() {
+        eprintln!(
+            "Config missing keys in [storage]: {} (defaults will be used).",
+            missing.join(", ")
+        );
     }
 }
 
@@ -429,11 +471,21 @@ fn build_vault(db_path: &str, vault: PathBuf) -> Result<()> {
 }
 
 fn run_weekly(config_path: PathBuf) -> Result<()> {
+    ensure_config_path(&config_path)?;
+    let python = find_python_interpreter()?;
+    let collector_path = Path::new("workers/collectors/ky_public_notice_larue.py");
+    if !collector_path.exists() {
+        return Err(anyhow!(
+            "Collector script not found: {}",
+            collector_path.display()
+        ));
+    }
+
     let config = load_config(&config_path)?;
     let storage = resolve_storage(Some(&config));
 
-    let output = Command::new("python")
-        .arg("workers/collectors/ky_public_notice_larue.py")
+    let output = Command::new(&python)
+        .arg(collector_path)
         .arg("--config")
         .arg(&config_path)
         .output()?;
@@ -455,10 +507,10 @@ fn run_weekly(config_path: PathBuf) -> Result<()> {
     ingest_dir(artifacts_dir, &storage.db_path)?;
 
     if fiscal_court_enabled(&config) {
-        run_fiscal_court_collector(&config_path)?;
+        run_fiscal_court_collector(&python, &config_path)?;
         let artifacts_dir = storage.out_dir.join("artifacts");
         ingest_dir(artifacts_dir.clone(), &storage.db_path)?;
-        parse_meetings(&storage, artifacts_dir)?;
+        parse_meetings(&python, &storage, artifacts_dir)?;
         let meetings_dir = storage.out_dir.join("meetings");
         ingest_meeting_dir(meetings_dir, &storage.db_path)?;
     }
@@ -477,9 +529,17 @@ fn fiscal_court_enabled(config: &Config) -> bool {
         .unwrap_or(false)
 }
 
-fn run_fiscal_court_collector(config_path: &PathBuf) -> Result<()> {
-    let output = Command::new("python")
-        .arg("workers/collectors/larue_fiscal_court_agendas.py")
+fn run_fiscal_court_collector(python: &str, config_path: &PathBuf) -> Result<()> {
+    let collector_path = Path::new("workers/collectors/larue_fiscal_court_agendas.py");
+    if !collector_path.exists() {
+        return Err(anyhow!(
+            "Collector script not found: {}",
+            collector_path.display()
+        ));
+    }
+
+    let output = Command::new(python)
+        .arg(collector_path)
         .arg("--config")
         .arg(config_path)
         .output()?;
@@ -499,7 +559,7 @@ fn run_fiscal_court_collector(config_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn parse_meetings(storage: &ResolvedStorage, artifacts_dir: PathBuf) -> Result<()> {
+fn parse_meetings(python: &str, storage: &ResolvedStorage, artifacts_dir: PathBuf) -> Result<()> {
     let snapshots_dir = storage.out_dir.join("snapshots");
     let meetings_dir = storage.out_dir.join("meetings");
     fs::create_dir_all(&meetings_dir)?;
@@ -554,8 +614,16 @@ fn parse_meetings(storage: &ResolvedStorage, artifacts_dir: PathBuf) -> Result<(
             }
         };
 
-        let output = Command::new("python")
-            .arg("workers/parsers/parse_meeting_minutes.py")
+        let parser_path = Path::new("workers/parsers/parse_meeting_minutes.py");
+        if !parser_path.exists() {
+            return Err(anyhow!(
+                "Meeting parser script not found: {}",
+                parser_path.display()
+            ));
+        }
+
+        let output = Command::new(python)
+            .arg(parser_path)
             .arg("--artifact")
             .arg(&path)
             .arg("--snapshot")
@@ -581,6 +649,24 @@ fn parse_meetings(storage: &ResolvedStorage, artifacts_dir: PathBuf) -> Result<(
         }
     }
     Ok(())
+}
+
+fn find_python_interpreter() -> Result<String> {
+    match Command::new("python3").arg("--version").output() {
+        Ok(_) => return Ok("python3".to_string()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(anyhow!("Failed to check python3: {err}"));
+        }
+    }
+
+    match Command::new("python").arg("--version").output() {
+        Ok(_) => Ok("python".to_string()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(anyhow!(
+            "Python interpreter not found. Install python3 or ensure python is on PATH."
+        )),
+        Err(err) => Err(anyhow!("Failed to check python: {err}")),
+    }
 }
 
 fn report_weekly(config_path: PathBuf) -> Result<()> {
