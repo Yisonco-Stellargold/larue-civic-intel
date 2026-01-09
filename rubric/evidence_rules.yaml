@@ -1,0 +1,19 @@
+version: 0.1
+
+acceptable_sources:
+  - meeting_minutes
+  - agenda_packet
+  - recorded_vote
+  - public_notice
+  - ordinance_text
+
+confidence_weights:
+  recorded_vote: 1.0
+  minutes_summary: 0.8
+  agenda_only: 0.6
+  media_report: 0.4
+
+requirements:
+  motion_scoring:
+    minimum_sources: 1
+    minimum_confidence: 0.6

@@ -1,0 +1,22 @@
+version: 0.1
+
+free_speech:
+  sections: ["§1", "§8"]
+
+due_process:
+  sections: ["§2", "§11"]
+
+property_rights:
+  sections: ["§13"]
+
+equal_protection:
+  sections: ["§3"]
+
+transparency:
+  sections: ["§1"]
+
+fiscal_restraint:
+  sections: ["§171", "§172"]
+
+local_self_governance:
+  sections: ["§59"]

@@ -1,0 +1,27 @@
+version: 0.1
+
+rules:
+  vote_yes:
+    description: >
+      A vote in favor of a motion inherits the motion’s base score.
+    effect: inherit
+
+  vote_no:
+    description: >
+      A vote against a motion inverts the motion’s base score.
+    effect: invert
+
+  abstain:
+    description: >
+      Abstentions slightly penalized for accountability.
+    penalty: -1
+
+  absent:
+    description: >
+      Absence penalized more than abstention.
+    penalty: -3
+
+  unknown_motion:
+    description: >
+      Motions lacking sufficient evidence receive a small penalty.
+    penalty: -5

@@ -1,0 +1,17 @@
+version: 0.1
+
+controls:
+  spending_bias:
+    description: >
+      Additional scrutiny applied to motions involving new spending.
+    penalty: -1
+
+  emergency_override:
+    description: >
+      Reduce penalties when emergency declarations are documented.
+    modifier: 0.5
+
+  first_occurrence_grace:
+    description: >
+      First-time deviations receive reduced penalty.
+    modifier: 0.7

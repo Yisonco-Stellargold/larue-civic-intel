@@ -1,3 +1,40 @@
 # values_rubric.yaml
 version: 0.1
 categories: {}
+version: 0.1
+
+axes:
+  free_speech:
+    description: >
+      Protection of speech, expression, press, and peaceful assembly.
+    score_range: [-10, 10]
+
+  due_process:
+    description: >
+      Fair procedures, notice, hearings, and appeal rights.
+    score_range: [-10, 10]
+
+  property_rights:
+    description: >
+      Respect for private property, takings limitations, zoning restraint.
+    score_range: [-10, 10]
+
+  equal_protection:
+    description: >
+      Equal treatment under law; avoidance of arbitrary discrimination.
+    score_range: [-10, 10]
+
+  transparency:
+    description: >
+      Open meetings, public records, clear decision-making.
+    score_range: [-10, 10]
+
+  fiscal_restraint:
+    description: >
+      Responsible taxation, spending discipline, debt avoidance.
+    score_range: [-10, 10]
+
+  local_self_governance:
+    description: >
+      Decisions kept local; resistance to unnecessary state/federal overreach.
+    score_range: [-10, 10]

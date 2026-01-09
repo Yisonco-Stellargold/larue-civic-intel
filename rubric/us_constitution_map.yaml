@@ -1,0 +1,24 @@
+version: 0.1
+
+free_speech:
+  amendments: [1]
+
+due_process:
+  amendments: [5, 14]
+
+property_rights:
+  amendments: [5]
+
+equal_protection:
+  amendments: [14]
+
+transparency:
+  principles:
+    - republican_form_of_government
+
+fiscal_restraint:
+  principles:
+    - taxation_with_representation
+
+local_self_governance:
+  amendments: [10]
