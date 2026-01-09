@@ -79,6 +79,17 @@ false positives.
 - `cargo run -p cli -- ingest-decisions --config ./config.toml`
 - `cargo run -p cli -- run-weekly --config ./config.toml`
 
+## Rubric Scoring (Stage 5)
+
+Weekly rubric scoring is deterministic and auditable. It uses the weights and bias controls under
+`/rubric` and defaults to neutral scores with an “insufficient evidence” flag when rules do not
+provide strong matches.
+
+- Tune weights and thresholds in `rubric/weights.yaml`, `rubric/rubric_config.toml`, and
+  `rubric/bias_controls.yaml`.
+- Run scoring manually with:
+  - `cargo run -p cli -- score-weekly --config ./config.toml`
+
 ## Roadmap
 
 Planned interfaces (placeholders only; no live integrations yet):

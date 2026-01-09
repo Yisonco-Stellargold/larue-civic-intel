@@ -4,6 +4,9 @@ use serde_json;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use time::{Duration, OffsetDateTime};
+use time::format_description::FormatItem;
+use time::format_description::well_known::Rfc3339;
 
 pub struct VaultPaths {
     pub root: PathBuf,
@@ -117,7 +120,13 @@ pub fn build_vault(conn: &Connection, vault_root: &Path) -> Result<()> {
     // 4) Write decision meeting notes
     write_decision_meeting_notes(conn, &paths)?;
 
-    // 5) Write issue MOC
+    // 5) Write weekly score report
+    write_score_report(conn, &paths)?;
+
+    // 6) Write reports MOC
+    write_reports_moc(&paths)?;
+
+    // 7) Write issue MOC
     let mut issue_lines: Vec<String> = Vec::new();
     issue_lines.push("# MOC - Issues".to_string());
     issue_lines.push(String::new());
@@ -387,6 +396,149 @@ fn write_decision_meeting_notes(conn: &Connection, paths: &VaultPaths) -> Result
     }
 
     Ok(())
+}
+
+fn write_score_report(conn: &Connection, paths: &VaultPaths) -> Result<()> {
+    let now = OffsetDateTime::now_utc();
+    let start = now - Duration::days(7);
+    let date_format: &[FormatItem<'_>] = time::macros::format_description!("[year]-[month]-[day]");
+    let date_str = now.format(date_format)?;
+    let window_start = start.format(&Rfc3339)?;
+    let window_end = now.format(&Rfc3339)?;
+
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT decision_scores.overall_score, decision_scores.flags_json, motions.text
+        FROM decision_scores
+        JOIN motions ON decision_scores.motion_id = motions.id
+        JOIN meetings ON motions.meeting_id = meetings.id
+        WHERE decision_scores.motion_id IS NOT NULL
+          AND datetime(meetings.started_at) >= datetime(?1)
+          AND datetime(meetings.started_at) <= datetime(?2)
+        "#,
+    )?;
+    let rows = stmt.query_map([window_start.as_str(), window_end.as_str()], |row| {
+        let flags_json: String = row.get(1)?;
+        let flags: Vec<String> = serde_json::from_str(&flags_json).unwrap_or_default();
+        Ok((row.get::<_, f64>(0)?, flags, row.get::<_, String>(2)?))
+    })?;
+
+    let mut scores = Vec::new();
+    let mut insufficient = 0usize;
+    for row in rows {
+        let (score, flags, text) = row?;
+        if flags.iter().any(|flag| flag == "insufficient_evidence") {
+            insufficient += 1;
+        }
+        scores.push((score, text));
+    }
+    let total_scored = scores.len();
+    let average_score = if total_scored == 0 {
+        0.0
+    } else {
+        scores.iter().map(|(score, _)| score).sum::<f64>() / total_scored as f64
+    };
+
+    scores.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let top_negative = scores.iter().take(3).collect::<Vec<_>>();
+    let top_positive = scores.iter().rev().take(3).collect::<Vec<_>>();
+
+    let drift_flags = load_drift_flags(conn, &window_start, &window_end)?;
+
+    let report_dir = paths.root.join("Reports").join("Weekly");
+    fs::create_dir_all(&report_dir)?;
+    let report_path = report_dir.join(format!("{date_str}-scores.md"));
+
+    let mut md = String::new();
+    md.push_str(&format!("# Rubric Scores {date_str}\n\n"));
+    md.push_str(&format!("Window: {window_start} to {window_end} UTC\n\n"));
+    if total_scored == 0 {
+        md.push_str("_No decision scores available this week._\n");
+    } else {
+        md.push_str(&format!("- Average score: {:.1}\n", average_score));
+        md.push_str(&format!("- Insufficient evidence: {insufficient}\n"));
+        if !top_positive.is_empty() {
+            md.push_str("\n## Top Positive\n");
+            for (score, text) in top_positive {
+                md.push_str(&format!("- {text} ({score:.1})\n"));
+            }
+        }
+        if !top_negative.is_empty() {
+            md.push_str("\n## Top Negative\n");
+            for (score, text) in top_negative {
+                md.push_str(&format!("- {text} ({score:.1})\n"));
+            }
+        }
+        if !drift_flags.is_empty() {
+            md.push_str("\n## Drift Flags\n");
+            for flag in drift_flags {
+                md.push_str(&format!("- {flag}\n"));
+            }
+        }
+    }
+
+    fs::write(report_path, md)?;
+    Ok(())
+}
+
+fn write_reports_moc(paths: &VaultPaths) -> Result<()> {
+    let mut report_lines = Vec::new();
+    report_lines.push("# MOC - Reports".to_string());
+    report_lines.push(String::new());
+    report_lines.push("This index is generated. Do not edit manually.".to_string());
+    report_lines.push(String::new());
+
+    let reports_dir = paths.root.join("Reports").join("Weekly");
+    if reports_dir.exists() {
+        let mut report_links: Vec<String> = fs::read_dir(&reports_dir)?
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+                    return None;
+                }
+                let stem = path.file_stem()?.to_str()?.to_string();
+                Some(format!("- [[Reports/Weekly/{stem}|{stem}]]"))
+            })
+            .collect();
+        report_links.sort();
+        if report_links.is_empty() {
+            report_lines.push("_No weekly reports found._".to_string());
+        } else {
+            report_lines.extend(report_links);
+        }
+    } else {
+        report_lines.push("_No weekly reports found._".to_string());
+    }
+
+    let moc_path = paths.index_dir.join("MOC - Reports.md");
+    fs::write(moc_path, report_lines.join("\n"))?;
+    Ok(())
+}
+
+fn load_drift_flags(conn: &Connection, window_start: &str, window_end: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT official_name, axis, deviation
+        FROM official_drift
+        WHERE datetime(computed_at) >= datetime(?1)
+          AND datetime(computed_at) <= datetime(?2)
+        ORDER BY computed_at DESC
+        "#,
+    )?;
+    let rows = stmt.query_map([window_start, window_end], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, f64>(2)?,
+        ))
+    })?;
+    let mut flags = Vec::new();
+    for row in rows {
+        let (official, axis, deviation) = row?;
+        flags.push(format!("{official}: drift_detected:{axis} ({deviation:.2})"));
+    }
+    Ok(flags)
 }
 
 fn update_issue_counts(tags_json: &str, issue_counts: &mut BTreeMap<String, usize>) {

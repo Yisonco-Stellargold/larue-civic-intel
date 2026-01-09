@@ -1,15 +1,16 @@
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
+use civic_core::scoring::{DecisionScore, LinkedArtifact, Rubric, ScoreResult, VoteChoice};
 use schemars::schema_for;
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
 use std::path::Path;
 use std::process::Command;
 use time::format_description::well_known::Rfc3339;
 use time::format_description::FormatItem;
-use time::{Duration, OffsetDateTime};
+use time::{Date, Duration, OffsetDateTime, Time};
 
 #[derive(Parser)]
 #[command(name = "larue")]
@@ -99,6 +100,15 @@ enum Commands {
         #[arg(long)]
         config: PathBuf,
     },
+    /// Score weekly decisions using the rubric
+    ScoreWeekly {
+        /// Config file path
+        #[arg(long)]
+        config: PathBuf,
+        /// Override report date (YYYY-MM-DD)
+        #[arg(long)]
+        date: Option<String>,
+    },
     /// Generate a weekly report (last 7 days) from the database
     ReportWeekly {
         /// Config file path
@@ -147,6 +157,7 @@ fn main() -> Result<()> {
         Commands::ExtractText { config } => extract_text(config),
         Commands::TagArtifacts { config, force } => tag_artifacts(config, force),
         Commands::IngestDecisions { config } => ingest_decisions(config),
+        Commands::ScoreWeekly { config, date } => score_weekly(config, date),
         Commands::ReportWeekly { config } => report_weekly(config),
         Commands::DigestWeekly => digest_weekly(),
         Commands::Publish => publish_placeholder(),
@@ -586,6 +597,10 @@ fn run_weekly(config_path: PathBuf) -> Result<()> {
         eprintln!("Warning: ingest-decisions failed: {err}");
     }
 
+    if let Err(err) = score_weekly(config_path.clone(), None) {
+        eprintln!("Warning: score-weekly failed: {err}");
+    }
+
     report_weekly(config_path.clone())?;
     build_vault(&storage.db_path, storage.vault_path)?;
     Ok(())
@@ -904,6 +919,122 @@ fn ingest_decisions(config_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn score_weekly(config_path: PathBuf, date: Option<String>) -> Result<()> {
+    ensure_config_path(&config_path)?;
+    let config = load_config(&config_path)?;
+    let storage = resolve_storage(Some(&config));
+    let rubric = Rubric::load_from_dir(Path::new("rubric"))?;
+
+    let (_date_str, window_start, window_end) = resolve_window(date)?;
+    let conn = civic_core::db::open(&storage.db_path)?;
+
+    let meetings = load_meetings_in_window(&conn, &window_start, &window_end)?;
+    if meetings.is_empty() {
+        println!("motions_scored=0 votes_scored=0 insufficient=0 flagged=0");
+        return Ok(());
+    }
+
+    let mut motion_scores: HashMap<String, ScoreResult> = HashMap::new();
+    let mut scores_to_write: Vec<DecisionScore> = Vec::new();
+    let mut motions_scored = 0usize;
+    let mut votes_scored = 0usize;
+    let mut insufficient = 0usize;
+    let mut flagged = 0usize;
+    let computed_at = window_end.clone();
+
+    for meeting in &meetings {
+        let artifacts = load_linked_artifacts(&conn, meeting)?;
+        let motions = load_motions_for_meeting(&conn, &meeting.id)?;
+        for motion in motions {
+            let score = civic_core::scoring::compute_motion_score(
+                &motion.text,
+                &artifacts,
+                &rubric,
+            );
+            if score.flags.iter().any(|flag| flag == "insufficient_evidence") {
+                insufficient += 1;
+            }
+            if !score.flags.is_empty() {
+                flagged += 1;
+            }
+            motions_scored += 1;
+            motion_scores.insert(motion.id.clone(), score.clone());
+            scores_to_write.push(DecisionScore {
+                id: format!("motion:{}", motion.id),
+                meeting_id: Some(meeting.id.clone()),
+                motion_id: Some(motion.id.clone()),
+                vote_id: None,
+                overall_score: score.overall_score,
+                axis_scores: score.axis_scores.clone(),
+                constitutional_refs: score.constitutional_refs.clone(),
+                evidence: score.evidence.clone(),
+                confidence: score.confidence,
+                flags: score.flags.clone(),
+                computed_at: computed_at.clone(),
+            });
+        }
+
+        let votes = load_votes_for_meeting(&conn, &meeting.id)?;
+        for vote in votes {
+            let Some(motion_score) = motion_scores.get(&vote.motion_id) else {
+                continue;
+            };
+            let mut per_vote_scores = Vec::new();
+            for (name, choice) in vote.choices {
+                let mut score =
+                    civic_core::scoring::compute_vote_score_with_motion(motion_score, choice, &rubric);
+                score.evidence.push(format!("official:{name}"));
+                let score_id = format!("vote:{}:{}", vote.id, slugify(&name));
+                if score.flags.iter().any(|flag| flag == "insufficient_evidence") {
+                    insufficient += 1;
+                }
+                if !score.flags.is_empty() {
+                    flagged += 1;
+                }
+                votes_scored += 1;
+                per_vote_scores.push((score_id, name, score));
+            }
+
+            for (score_id, name, score) in per_vote_scores {
+                scores_to_write.push(DecisionScore {
+                    id: score_id,
+                    meeting_id: Some(meeting.id.clone()),
+                    motion_id: Some(vote.motion_id.clone()),
+                    vote_id: Some(vote.id.clone()),
+                    overall_score: score.overall_score,
+                    axis_scores: score.axis_scores.clone(),
+                    constitutional_refs: score.constitutional_refs.clone(),
+                    evidence: score.evidence.clone(),
+                    confidence: score.confidence,
+                    flags: score.flags.clone(),
+                    computed_at: computed_at.clone(),
+                });
+            }
+        }
+    }
+
+    for score in &scores_to_write {
+        civic_core::db::upsert_decision_score(&conn, score)?;
+    }
+
+    let drift_flags = detect_drift(
+        &conn,
+        &rubric,
+        &window_start,
+        &window_end,
+        &computed_at,
+    )?;
+    for score in drift_flags.updated_scores {
+        civic_core::db::upsert_decision_score(&conn, &score)?;
+    }
+
+    println!(
+        "motions_scored={} votes_scored={} insufficient={} flagged={}",
+        motions_scored, votes_scored, insufficient, flagged
+    );
+    Ok(())
+}
+
 fn report_weekly(config_path: PathBuf) -> Result<()> {
     let config = load_config(&config_path)?;
     let storage = resolve_storage(Some(&config));
@@ -964,6 +1095,7 @@ fn report_weekly(config_path: PathBuf) -> Result<()> {
     regular.sort_by_key(sort_key);
 
     let decisions = load_decisions(&conn, &window_start, &window_end)?;
+    let score_summary = load_score_summary(&conn, &window_start, &window_end)?;
 
     markdown.push_str(&format!("Total artifacts: {}\n\n", artifacts.len()));
     markdown.push_str("## High Impact\n\n");
@@ -1016,6 +1148,45 @@ fn report_weekly(config_path: PathBuf) -> Result<()> {
             }
         }
     }
+    markdown.push('\n');
+
+    markdown.push_str("## Rubric Alignment (This Week)\n\n");
+    if score_summary.total_scored == 0 {
+        markdown.push_str("_No decision scores available this week._\n");
+    } else {
+        markdown.push_str(&format!(
+            "- Average score: {:.1}\n",
+            score_summary.average_score
+        ));
+        markdown.push_str(&format!(
+            "- Insufficient evidence: {}\n",
+            score_summary.insufficient_count
+        ));
+        if !score_summary.top_positive.is_empty() {
+            markdown.push_str("- Top positive decisions:\n");
+            for entry in &score_summary.top_positive {
+                markdown.push_str(&format!(
+                    "  - {} ({})\n",
+                    entry.text, entry.overall_score
+                ));
+            }
+        }
+        if !score_summary.top_negative.is_empty() {
+            markdown.push_str("- Top negative decisions:\n");
+            for entry in &score_summary.top_negative {
+                markdown.push_str(&format!(
+                    "  - {} ({})\n",
+                    entry.text, entry.overall_score
+                ));
+            }
+        }
+        if !score_summary.drift_flags.is_empty() {
+            markdown.push_str("- Drift flags:\n");
+            for flag in &score_summary.drift_flags {
+                markdown.push_str(&format!("  - {flag}\n"));
+            }
+        }
+    }
     fs::write(&report_path, markdown)?;
 
     let report_json_dir = storage
@@ -1053,6 +1224,7 @@ fn report_weekly(config_path: PathBuf) -> Result<()> {
         "total": artifacts.len(),
         "text_extracted_total": extracted_count,
         "issue_tag_counts": issue_tag_counts,
+        "rubric_alignment": score_summary.to_json(),
         "decisions": decisions.iter().map(|meeting| {
             serde_json::json!({
                 "meeting_id": meeting.id,
@@ -1116,6 +1288,69 @@ struct ReportDecisionMeeting {
     motions: Vec<ReportDecisionMotion>,
 }
 
+struct MeetingWindowRow {
+    id: String,
+    body_id: String,
+    started_at: String,
+    artifact_ids_json: String,
+}
+
+struct MotionRow {
+    id: String,
+    text: String,
+}
+
+struct VoteRow {
+    id: String,
+    motion_id: String,
+    ayes: Vec<String>,
+    nays: Vec<String>,
+    abstain: Vec<String>,
+    choices: Vec<(String, VoteChoice)>,
+}
+
+struct DriftDetectionResult {
+    updated_scores: Vec<DecisionScore>,
+    drift_flags: Vec<String>,
+}
+
+struct ScoreDecisionEntry {
+    text: String,
+    overall_score: f64,
+}
+
+struct ScoreSummary {
+    average_score: f64,
+    total_scored: usize,
+    insufficient_count: usize,
+    top_positive: Vec<ScoreDecisionEntry>,
+    top_negative: Vec<ScoreDecisionEntry>,
+    drift_flags: Vec<String>,
+}
+
+impl ScoreSummary {
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "average_score": self.average_score,
+            "total_scored": self.total_scored,
+            "insufficient_count": self.insufficient_count,
+            "top_positive": self.top_positive.iter().map(|entry| {
+                serde_json::json!({
+                    "text": entry.text,
+                    "overall_score": entry.overall_score,
+                })
+            }).collect::<Vec<_>>(),
+            "top_negative": self.top_negative.iter().map(|entry| {
+                serde_json::json!({
+                    "text": entry.text,
+                    "overall_score": entry.overall_score,
+                })
+            }).collect::<Vec<_>>(),
+            "drift_flags": self.drift_flags,
+        })
+    }
+}
+
 impl ReportArtifactRow {
     fn is_high_impact(&self) -> bool {
         parse_tags_json(&self.tags_json)
@@ -1132,6 +1367,372 @@ impl ReportArtifactRow {
 
 fn parse_tags_json(tags_json: &str) -> Vec<String> {
     serde_json::from_str(tags_json).unwrap_or_default()
+}
+
+fn resolve_window(date: Option<String>) -> Result<(String, String, String)> {
+    let date_format: &[FormatItem<'_>] = time::macros::format_description!("[year]-[month]-[day]");
+    let now = OffsetDateTime::now_utc();
+    if let Some(date_value) = date {
+        let parsed = time::Date::parse(&date_value, date_format)
+            .map_err(|err| anyhow!("Invalid date {date_value}: {err}"))?;
+        let end = parsed.next_day().unwrap_or(parsed);
+        let end_dt = end.with_time(time::Time::MIDNIGHT).assume_utc();
+        let start_dt = end_dt - Duration::days(7);
+        let date_str = parsed.format(date_format)?;
+        let window_start = start_dt.format(&Rfc3339)?;
+        let window_end = end_dt.format(&Rfc3339)?;
+        return Ok((date_str, window_start, window_end));
+    }
+    let date_str = now.format(date_format)?;
+    let window_end = now.format(&Rfc3339)?;
+    let window_start = (now - Duration::days(7)).format(&Rfc3339)?;
+    Ok((date_str, window_start, window_end))
+}
+
+fn load_meetings_in_window(
+    conn: &rusqlite::Connection,
+    window_start: &str,
+    window_end: &str,
+) -> Result<Vec<MeetingWindowRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, body_id, started_at, artifact_ids_json
+        FROM meetings
+        WHERE datetime(started_at) >= datetime(?1)
+          AND datetime(started_at) <= datetime(?2)
+        ORDER BY started_at ASC, id ASC
+        "#,
+    )?;
+    let rows = stmt.query_map([window_start, window_end], |row| {
+        Ok(MeetingWindowRow {
+            id: row.get(0)?,
+            body_id: row.get(1)?,
+            started_at: row.get(2)?,
+            artifact_ids_json: row.get(3)?,
+        })
+    })?;
+    let mut meetings = Vec::new();
+    for row in rows {
+        meetings.push(row?);
+    }
+    Ok(meetings)
+}
+
+fn load_linked_artifacts(
+    conn: &rusqlite::Connection,
+    meeting: &MeetingWindowRow,
+) -> Result<Vec<LinkedArtifact>> {
+    let artifact_ids: Vec<String> =
+        serde_json::from_str(&meeting.artifact_ids_json).unwrap_or_default();
+    let mut artifacts = Vec::new();
+    for artifact_id in artifact_ids {
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT id, tags_json
+            FROM artifacts
+            WHERE id = ?1
+            "#,
+        )?;
+        let mut rows = stmt.query([artifact_id.as_str()])?;
+        if let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let tags_json: String = row.get(1)?;
+            artifacts.push(LinkedArtifact {
+                id,
+                tags: parse_tags_json(&tags_json),
+            });
+        }
+    }
+    Ok(artifacts)
+}
+
+fn load_motions_for_meeting(conn: &rusqlite::Connection, meeting_id: &str) -> Result<Vec<MotionRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, text
+        FROM motions
+        WHERE meeting_id = ?1
+        ORDER BY motion_index ASC, id ASC
+        "#,
+    )?;
+    let rows = stmt.query_map([meeting_id], |row| {
+        Ok(MotionRow {
+            id: row.get(0)?,
+            text: row.get(1)?,
+        })
+    })?;
+    let mut motions = Vec::new();
+    for row in rows {
+        motions.push(row?);
+    }
+    Ok(motions)
+}
+
+fn load_votes_for_meeting(conn: &rusqlite::Connection, meeting_id: &str) -> Result<Vec<VoteRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT votes.id, votes.motion_id, votes.ayes_json, votes.nays_json, votes.abstain_json
+        FROM votes
+        JOIN motions ON votes.motion_id = motions.id
+        WHERE motions.meeting_id = ?1
+        ORDER BY votes.id ASC
+        "#,
+    )?;
+    let rows = stmt.query_map([meeting_id], |row| {
+        let ayes_json: String = row.get(2)?;
+        let nays_json: String = row.get(3)?;
+        let abstain_json: String = row.get(4)?;
+        let ayes: Vec<String> = serde_json::from_str(&ayes_json).unwrap_or_default();
+        let nays: Vec<String> = serde_json::from_str(&nays_json).unwrap_or_default();
+        let abstain: Vec<String> = serde_json::from_str(&abstain_json).unwrap_or_default();
+        Ok(VoteRow {
+            id: row.get(0)?,
+            motion_id: row.get(1)?,
+            ayes: ayes.clone(),
+            nays: nays.clone(),
+            abstain: abstain.clone(),
+            choices: build_vote_choices(&ayes, &nays, &abstain),
+        })
+    })?;
+    let mut votes = Vec::new();
+    for row in rows {
+        votes.push(row?);
+    }
+    Ok(votes)
+}
+
+fn build_vote_choices(
+    ayes: &[String],
+    nays: &[String],
+    abstain: &[String],
+) -> Vec<(String, VoteChoice)> {
+    let mut choices = Vec::new();
+    for name in ayes {
+        choices.push((name.to_string(), VoteChoice::Aye));
+    }
+    for name in nays {
+        choices.push((name.to_string(), VoteChoice::Nay));
+    }
+    for name in abstain {
+        choices.push((name.to_string(), VoteChoice::Abstain));
+    }
+    choices.sort_by(|a, b| a.0.cmp(&b.0));
+    choices
+}
+
+fn slugify(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_alphanumeric() { ch.to_ascii_lowercase() } else { '_' })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string()
+}
+
+fn detect_drift(
+    conn: &rusqlite::Connection,
+    rubric: &Rubric,
+    window_start: &str,
+    window_end: &str,
+    computed_at: &str,
+) -> Result<DriftDetectionResult> {
+    let current_scores = load_vote_scores(conn, window_start, window_end)?;
+    let mut updated_scores = Vec::new();
+    let mut drift_flags = Vec::new();
+
+    for (official, axis_scores) in current_scores {
+        for (axis, current_avg) in axis_scores {
+            let prior_scores = load_prior_vote_scores(
+                conn,
+                &official,
+                &axis,
+                window_start,
+                rubric.bias_controls.drift_window,
+            )?;
+            if prior_scores.len() < rubric.bias_controls.drift_window {
+                continue;
+            }
+            let prior_avg = average(&prior_scores);
+            let deviation = current_avg - prior_avg;
+            if deviation.abs() >= rubric.bias_controls.drift_threshold {
+                let flag = format!("drift_detected:{axis}");
+                drift_flags.push(format!("{official}:{flag}"));
+                let drift_id = format!("drift:{}:{}:{}", slugify(&official), axis, window_end);
+                civic_core::db::upsert_official_drift(
+                    conn,
+                    &drift_id,
+                    &official,
+                    &axis,
+                    prior_avg,
+                    current_avg,
+                    deviation,
+                    &[flag.clone()],
+                    computed_at,
+                )?;
+                let scores = load_scores_for_official_in_window(conn, &official, window_start, window_end)?;
+                for mut score in scores {
+                    if !score.flags.contains(&flag) {
+                        score.flags.push(flag.clone());
+                    }
+                    updated_scores.push(score);
+                }
+            }
+        }
+    }
+
+    Ok(DriftDetectionResult {
+        updated_scores,
+        drift_flags,
+    })
+}
+
+fn load_vote_scores(
+    conn: &rusqlite::Connection,
+    window_start: &str,
+    window_end: &str,
+) -> Result<HashMap<String, HashMap<String, f64>>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT decision_scores.axis_json, decision_scores.evidence_json
+        FROM decision_scores
+        WHERE vote_id IS NOT NULL
+          AND datetime(computed_at) >= datetime(?1)
+          AND datetime(computed_at) <= datetime(?2)
+        "#,
+    )?;
+    let rows = stmt.query_map([window_start, window_end], |row| {
+        let axis_json: String = row.get(0)?;
+        let evidence_json: String = row.get(1)?;
+        let axis_scores: HashMap<String, f64> =
+            serde_json::from_str(&axis_json).unwrap_or_default();
+        let evidence: Vec<String> = serde_json::from_str(&evidence_json).unwrap_or_default();
+        Ok((axis_scores, evidence))
+    })?;
+
+    let mut official_axes: HashMap<String, HashMap<String, Vec<f64>>> = HashMap::new();
+    for row in rows {
+        let (axis_scores, evidence) = row?;
+        let official = extract_official(&evidence);
+        let Some(official) = official else { continue };
+        let axes = official_axes.entry(official).or_default();
+        for (axis, score) in axis_scores {
+            axes.entry(axis).or_default().push(score);
+        }
+    }
+
+    let mut averages = HashMap::new();
+    for (official, axes) in official_axes {
+        let mut axis_avg = HashMap::new();
+        for (axis, values) in axes {
+            axis_avg.insert(axis, average(&values));
+        }
+        averages.insert(official, axis_avg);
+    }
+    Ok(averages)
+}
+
+fn load_prior_vote_scores(
+    conn: &rusqlite::Connection,
+    official: &str,
+    axis: &str,
+    window_start: &str,
+    limit: usize,
+) -> Result<Vec<f64>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT axis_json, evidence_json
+        FROM decision_scores
+        WHERE vote_id IS NOT NULL
+          AND datetime(computed_at) < datetime(?1)
+        ORDER BY computed_at DESC
+        "#,
+    )?;
+    let rows = stmt.query_map([window_start], |row| {
+        let axis_json: String = row.get(0)?;
+        let evidence_json: String = row.get(1)?;
+        Ok((axis_json, evidence_json))
+    })?;
+    let mut scores = Vec::new();
+    for row in rows {
+        let (axis_json, evidence_json) = row?;
+        let evidence: Vec<String> = serde_json::from_str(&evidence_json).unwrap_or_default();
+        if extract_official(&evidence).as_deref() != Some(official) {
+            continue;
+        }
+        let axis_scores: HashMap<String, f64> =
+            serde_json::from_str(&axis_json).unwrap_or_default();
+        if let Some(score) = axis_scores.get(axis) {
+            scores.push(*score);
+        }
+        if scores.len() >= limit {
+            break;
+        }
+    }
+    Ok(scores)
+}
+
+fn load_scores_for_official_in_window(
+    conn: &rusqlite::Connection,
+    official: &str,
+    window_start: &str,
+    window_end: &str,
+) -> Result<Vec<DecisionScore>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, meeting_id, motion_id, vote_id, overall_score, axis_json, refs_json,
+               evidence_json, confidence, flags_json, computed_at
+        FROM decision_scores
+        WHERE vote_id IS NOT NULL
+          AND datetime(computed_at) >= datetime(?1)
+          AND datetime(computed_at) <= datetime(?2)
+        "#,
+    )?;
+    let rows = stmt.query_map([window_start, window_end], |row| {
+        let axis_json: String = row.get(5)?;
+        let refs_json: String = row.get(6)?;
+        let evidence_json: String = row.get(7)?;
+        let flags_json: String = row.get(9)?;
+        let axis_scores: HashMap<String, f64> =
+            serde_json::from_str(&axis_json).unwrap_or_default();
+        let refs: Vec<String> = serde_json::from_str(&refs_json).unwrap_or_default();
+        let evidence: Vec<String> = serde_json::from_str(&evidence_json).unwrap_or_default();
+        let flags: Vec<String> = serde_json::from_str(&flags_json).unwrap_or_default();
+        Ok(DecisionScore {
+            id: row.get(0)?,
+            meeting_id: row.get(1)?,
+            motion_id: row.get(2)?,
+            vote_id: row.get(3)?,
+            overall_score: row.get(4)?,
+            axis_scores,
+            constitutional_refs: refs,
+            evidence,
+            confidence: row.get(8)?,
+            flags,
+            computed_at: row.get(10)?,
+        })
+    })?;
+    let mut results = Vec::new();
+    for row in rows {
+        let score = row?;
+        if extract_official(&score.evidence).as_deref() != Some(official) {
+            continue;
+        }
+        results.push(score);
+    }
+    Ok(results)
+}
+
+fn extract_official(evidence: &[String]) -> Option<String> {
+    evidence.iter().find_map(|item| {
+        item.strip_prefix("official:").map(|value| value.to_string())
+    })
+}
+
+fn average(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.iter().sum::<f64>() / values.len() as f64
 }
 
 fn load_decisions(
@@ -1182,6 +1783,105 @@ fn load_decisions(
         results.push(meeting);
     }
     Ok(results)
+}
+
+fn load_score_summary(
+    conn: &rusqlite::Connection,
+    window_start: &str,
+    window_end: &str,
+) -> Result<ScoreSummary> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT decision_scores.overall_score, decision_scores.flags_json, motions.text
+        FROM decision_scores
+        JOIN motions ON decision_scores.motion_id = motions.id
+        JOIN meetings ON motions.meeting_id = meetings.id
+        WHERE decision_scores.motion_id IS NOT NULL
+          AND datetime(meetings.started_at) >= datetime(?1)
+          AND datetime(meetings.started_at) <= datetime(?2)
+        "#,
+    )?;
+    let rows = stmt.query_map([window_start, window_end], |row| {
+        let flags_json: String = row.get(1)?;
+        let flags: Vec<String> = serde_json::from_str(&flags_json).unwrap_or_default();
+        Ok((row.get::<_, f64>(0)?, flags, row.get::<_, String>(2)?))
+    })?;
+
+    let mut scores = Vec::new();
+    let mut insufficient_count = 0usize;
+    for row in rows {
+        let (score, flags, text) = row?;
+        if flags.iter().any(|flag| flag == "insufficient_evidence") {
+            insufficient_count += 1;
+        }
+        scores.push((score, text));
+    }
+
+    let total_scored = scores.len();
+    let average_score = if total_scored == 0 {
+        0.0
+    } else {
+        scores.iter().map(|(score, _)| score).sum::<f64>() / total_scored as f64
+    };
+
+    scores.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let top_negative = scores
+        .iter()
+        .take(3)
+        .map(|(score, text)| ScoreDecisionEntry {
+            text: text.clone(),
+            overall_score: *score,
+        })
+        .collect::<Vec<_>>();
+    let top_positive = scores
+        .iter()
+        .rev()
+        .take(3)
+        .map(|(score, text)| ScoreDecisionEntry {
+            text: text.clone(),
+            overall_score: *score,
+        })
+        .collect::<Vec<_>>();
+
+    let drift_flags = load_drift_flags(conn, window_start, window_end)?;
+
+    Ok(ScoreSummary {
+        average_score,
+        total_scored,
+        insufficient_count,
+        top_positive,
+        top_negative,
+        drift_flags,
+    })
+}
+
+fn load_drift_flags(
+    conn: &rusqlite::Connection,
+    window_start: &str,
+    window_end: &str,
+) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT official_name, axis, deviation
+        FROM official_drift
+        WHERE datetime(computed_at) >= datetime(?1)
+          AND datetime(computed_at) <= datetime(?2)
+        ORDER BY computed_at DESC
+        "#,
+    )?;
+    let rows = stmt.query_map([window_start, window_end], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, f64>(2)?,
+        ))
+    })?;
+    let mut flags = Vec::new();
+    for row in rows {
+        let (official, axis, deviation) = row?;
+        flags.push(format!("{official}: drift_detected:{axis} ({deviation:.2})"));
+    }
+    Ok(flags)
 }
 
 fn is_issue_tag(tag: &str) -> bool {

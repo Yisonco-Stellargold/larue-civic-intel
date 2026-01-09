@@ -1,4 +1,5 @@
 use crate::schema::{Artifact, Body, DecisionMeeting, DecisionMotion, DecisionVote, Meeting};
+use crate::scoring::DecisionScore;
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use serde_json::Value;
@@ -75,6 +76,35 @@ fn init(conn: &Connection) -> Result<()> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_votes_motion_id ON votes(motion_id);
+
+        CREATE TABLE IF NOT EXISTS decision_scores (
+          id TEXT PRIMARY KEY,
+          meeting_id TEXT,
+          motion_id TEXT,
+          vote_id TEXT,
+          overall_score REAL NOT NULL,
+          axis_json TEXT NOT NULL,
+          refs_json TEXT NOT NULL,
+          evidence_json TEXT NOT NULL,
+          confidence REAL NOT NULL,
+          flags_json TEXT NOT NULL,
+          computed_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_decision_scores_meeting_id ON decision_scores(meeting_id);
+        CREATE INDEX IF NOT EXISTS idx_decision_scores_motion_id ON decision_scores(motion_id);
+        CREATE INDEX IF NOT EXISTS idx_decision_scores_vote_id ON decision_scores(vote_id);
+
+        CREATE TABLE IF NOT EXISTS official_drift (
+          id TEXT PRIMARY KEY,
+          official_name TEXT NOT NULL,
+          axis TEXT NOT NULL,
+          prior_average REAL NOT NULL,
+          current_average REAL NOT NULL,
+          deviation REAL NOT NULL,
+          flags_json TEXT NOT NULL,
+          computed_at TEXT NOT NULL
+        );
         "#,
     )?;
     seed_bodies(conn)?;
@@ -285,6 +315,89 @@ pub fn upsert_vote(
             nays_json,
             abstain_json,
             raw_json_str
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn upsert_decision_score(conn: &Connection, score: &DecisionScore) -> Result<()> {
+    let axis_json = serde_json::to_string(&score.axis_scores)?;
+    let refs_json = serde_json::to_string(&score.constitutional_refs)?;
+    let evidence_json = serde_json::to_string(&score.evidence)?;
+    let flags_json = serde_json::to_string(&score.flags)?;
+
+    conn.execute(
+        r#"
+        INSERT INTO decision_scores (
+          id, meeting_id, motion_id, vote_id, overall_score, axis_json, refs_json,
+          evidence_json, confidence, flags_json, computed_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+        ON CONFLICT(id) DO UPDATE SET
+          meeting_id=excluded.meeting_id,
+          motion_id=excluded.motion_id,
+          vote_id=excluded.vote_id,
+          overall_score=excluded.overall_score,
+          axis_json=excluded.axis_json,
+          refs_json=excluded.refs_json,
+          evidence_json=excluded.evidence_json,
+          confidence=excluded.confidence,
+          flags_json=excluded.flags_json,
+          computed_at=excluded.computed_at
+        "#,
+        params![
+            score.id,
+            score.meeting_id,
+            score.motion_id,
+            score.vote_id,
+            score.overall_score,
+            axis_json,
+            refs_json,
+            evidence_json,
+            score.confidence,
+            flags_json,
+            score.computed_at
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn upsert_official_drift(
+    conn: &Connection,
+    id: &str,
+    official_name: &str,
+    axis: &str,
+    prior_average: f64,
+    current_average: f64,
+    deviation: f64,
+    flags: &[String],
+    computed_at: &str,
+) -> Result<()> {
+    let flags_json = serde_json::to_string(flags)?;
+    conn.execute(
+        r#"
+        INSERT INTO official_drift (
+          id, official_name, axis, prior_average, current_average, deviation, flags_json, computed_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        ON CONFLICT(id) DO UPDATE SET
+          official_name=excluded.official_name,
+          axis=excluded.axis,
+          prior_average=excluded.prior_average,
+          current_average=excluded.current_average,
+          deviation=excluded.deviation,
+          flags_json=excluded.flags_json,
+          computed_at=excluded.computed_at
+        "#,
+        params![
+            id,
+            official_name,
+            axis,
+            prior_average,
+            current_average,
+            deviation,
+            flags_json,
+            computed_at
         ],
     )?;
     Ok(())
