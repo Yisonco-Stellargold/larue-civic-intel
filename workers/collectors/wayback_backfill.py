@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import time
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,6 @@ CONTENT_TYPE_EXTENSIONS = {
     "text/html": ".html",
     "application/pdf": ".pdf",
     "text/plain": ".txt",
-    "application/json": ".json",
 }
 
 
@@ -63,15 +63,11 @@ def save_state(path: Path, state: dict) -> None:
 
 
 def stable_id(original_url: str, timestamp: str) -> str:
-    digest = hashlib.sha256(f"{original_url}|{timestamp}".encode("utf-8")).hexdigest()[:16]
-    return f"wayback:{digest}"
+    return hashlib.sha256(f"{original_url}{timestamp}".encode("utf-8")).hexdigest()[:16]
 
 
 def change_id(original_url: str, timestamp: str) -> str:
-    digest = hashlib.sha256(
-        f"{original_url}|change|{timestamp}".encode("utf-8")
-    ).hexdigest()[:16]
-    return f"wayback-change:{digest}"
+    return hashlib.sha256(f"{original_url}change{timestamp}".encode("utf-8")).hexdigest()[:16]
 
 
 def archived_url(original_url: str, timestamp: str) -> str:
@@ -80,11 +76,9 @@ def archived_url(original_url: str, timestamp: str) -> str:
 
 def determine_extension(content_type: str, fallback_url: str) -> str:
     if not content_type:
-        parsed = urlparse(fallback_url)
-        suffix = Path(parsed.path).suffix
-        return suffix or ".html"
+        return ".bin"
     mime = content_type.split(";")[0].strip().lower()
-    return CONTENT_TYPE_EXTENSIONS.get(mime, Path(urlparse(fallback_url).path).suffix or ".html")
+    return CONTENT_TYPE_EXTENSIONS.get(mime, ".bin")
 
 
 def derive_tags(original_url: str, keywords: list[str], include_change: bool) -> list[str]:
@@ -106,13 +100,13 @@ def cdx_query(
     limit: int,
     match_type: str | None,
     sort: str | None,
+    throttle: "RateLimiter",
 ) -> list[dict[str, Any]]:
     params = [
         f"url={quote(url)}",
         "output=json",
-        "fl=timestamp,original,mimetype,statuscode",
+        "fl=timestamp,original,mimetype,statuscode,digest",
         "filter=statuscode:200",
-        "collapse=digest",
         f"limit={limit}",
     ]
     if match_type:
@@ -125,8 +119,13 @@ def cdx_query(
         params.append(f"to={end}")
     query = "&".join(params)
     request_url = f"{CDX_ENDPOINT}?{query}"
-    with urlopen(request_url) as response:
-        data = json.loads(response.read().decode("utf-8"))
+    try:
+        throttle.wait()
+        with urlopen(request_url) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        print(f"Failed to query CDX for {url}: {exc}")
+        return []
     if not data:
         return []
     headers = data[0]
@@ -137,10 +136,11 @@ def cdx_query(
     return rows
 
 
-def download_snapshot(url: str, destination: Path) -> tuple[str, bytes]:
+def download_snapshot(url: str, destination: Path, throttle: "RateLimiter") -> tuple[str | None, bytes]:
     request = Request(url, headers={"User-Agent": "larue-civic-intel/1.0"})
+    throttle.wait()
     with urlopen(request) as response:
-        content_type = response.headers.get("Content-Type", "text/html")
+        content_type = response.headers.get("Content-Type")
         payload = response.read()
         destination.write_bytes(payload)
     return content_type, payload
@@ -153,17 +153,39 @@ def hash_bytes(payload: bytes) -> str:
 def get_url_state(state: dict, url: str) -> dict:
     urls = state.setdefault("urls", {})
     url_state = urls.setdefault(
-        url, {"last_processed": None, "last_hash": None, "seen_ids": []}
+        url,
+        {
+            "last_processed": None,
+            "last_hash": None,
+            "last_snapshot_url": None,
+            "seen_ids": [],
+        },
     )
     url_state.setdefault("last_processed", None)
     url_state.setdefault("last_hash", None)
+    url_state.setdefault("last_snapshot_url", None)
     url_state.setdefault("seen_ids", [])
     if not isinstance(url_state["seen_ids"], list):
         url_state["seen_ids"] = []
     return url_state
 
 
-def run() -> None:
+class RateLimiter:
+    def __init__(self, interval_seconds: float) -> None:
+        self.interval_seconds = interval_seconds
+        self._last_call = 0.0
+
+    def wait(self) -> None:
+        if self.interval_seconds <= 0:
+            return
+        now = time.monotonic()
+        elapsed = now - self._last_call
+        if elapsed < self.interval_seconds:
+            time.sleep(self.interval_seconds - elapsed)
+        self._last_call = time.monotonic()
+
+
+def run() -> int:
     parser = argparse.ArgumentParser(description="Wayback Machine historical backfill collector.")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--start", type=str)
@@ -216,21 +238,23 @@ def run() -> None:
     enabled = get_nested(config, "sources", "wayback", "enabled", default=False)
     if not enabled:
         print("Wayback backfill disabled in config.")
-        return
+        return 0
 
     state_path = state_dir / STATE_FILENAME
     state = load_state(state_path)
 
     if not isinstance(urls, list) or not urls:
         print("No Wayback URLs configured.")
-        return
+        save_state(state_path, state)
+        return 0
 
     total_captures = 0
-    total_new = 0
+    total_downloaded = 0
     total_skipped = 0
     total_changes = 0
 
     remaining = limit_per_run
+    throttle = RateLimiter(rate_limit)
 
     for base_url in urls:
         if remaining <= 0:
@@ -238,20 +262,24 @@ def run() -> None:
         if not isinstance(base_url, str) or not base_url.strip():
             continue
 
-        match_type = "prefix" if include_subpaths else "exact"
+        match_type = "prefix" if include_subpaths else None
         query_url = base_url
 
         url_state = get_url_state(state, base_url)
+        previous_hash = url_state.get("last_hash")
+        previous_ts = url_state.get("last_processed")
         start = args.start
         if args.resume and not args.start:
             start = url_state.get("last_processed")
-        captures = cdx_query(query_url, start, args.end, remaining, match_type, "desc")
+        captures = cdx_query(query_url, start, args.end, remaining, match_type, "desc", throttle)
         if not captures:
             continue
 
+        change_checked = False
         for capture in captures:
             timestamp = capture.get("timestamp", "")
             original_url = capture.get("original", base_url)
+            cdx_mimetype = capture.get("mimetype")
             if not timestamp or not original_url:
                 continue
             total_captures += 1
@@ -264,8 +292,9 @@ def run() -> None:
             snapshot_ext = ".html"
             snapshot_path = snapshots_dir / f"{artifact_id}{snapshot_ext}"
             try:
-                content_type, payload = download_snapshot(snapshot_url, snapshot_path)
-                snapshot_ext = determine_extension(content_type, original_url)
+                content_type, payload = download_snapshot(snapshot_url, snapshot_path, throttle)
+                resolved_content_type = content_type or cdx_mimetype or "text/html"
+                snapshot_ext = determine_extension(resolved_content_type, original_url)
                 if snapshot_path.suffix != snapshot_ext:
                     final_path = snapshot_path.with_suffix(snapshot_ext)
                     snapshot_path.rename(final_path)
@@ -286,7 +315,9 @@ def run() -> None:
                 },
                 "title": f"Wayback snapshot: {original_url} @ {timestamp}",
                 "body_text": None,
-                "content_type": content_type.split(";")[0] if content_type else "text/html",
+                "content_type": resolved_content_type.split(";")[0]
+                if resolved_content_type
+                else "text/html",
                 "tags": derive_tags(original_url, keywords, include_change=False),
             }
             artifact_path = artifacts_dir / f"{artifact_id}.json"
@@ -296,52 +327,60 @@ def run() -> None:
             )
 
             content_hash = hash_bytes(payload)
-            previous_hash = url_state.get("last_hash")
-            previous_ts = url_state.get("last_processed")
-            if previous_hash and previous_hash != content_hash and previous_ts:
-                change_artifact_id = change_id(original_url, timestamp)
-                if change_artifact_id not in url_state["seen_ids"]:
-                    change_artifact = {
-                        "id": change_artifact_id,
-                        "source": {
-                            "kind": "wayback",
-                            "value": snapshot_url,
-                            "retrieved_at": retrieved_at,
-                        },
-                        "title": f"Wayback change detected: {original_url}",
-                        "body_text": (
-                            f"{previous_ts} -> {timestamp}\n"
-                            f"previous: {archived_url(original_url, previous_ts)}\n"
-                            f"current: {snapshot_url}"
-                        ),
-                        "content_type": "text/plain",
-                        "tags": derive_tags(original_url, keywords, include_change=True),
-                    }
-                    change_path = artifacts_dir / f"{change_artifact_id}.json"
-                    change_path.write_text(
-                        json.dumps(change_artifact, indent=2, sort_keys=True) + "\n",
-                        encoding="utf-8",
-                    )
-                    url_state["seen_ids"].append(change_artifact_id)
-                    total_changes += 1
+            if not change_checked:
+                if previous_hash and previous_hash != content_hash and previous_ts:
+                    change_artifact_id = change_id(original_url, timestamp)
+                    if change_artifact_id not in url_state["seen_ids"]:
+                        change_artifact = {
+                            "id": change_artifact_id,
+                            "source": {
+                                "kind": "wayback",
+                                "value": snapshot_url,
+                                "retrieved_at": retrieved_at,
+                            },
+                            "title": f"Wayback change detected: {original_url}",
+                            "body_text": (
+                                f"{previous_ts} -> {timestamp}\n"
+                                f"previous: {archived_url(original_url, previous_ts)}\n"
+                                f"current: {snapshot_url}"
+                            ),
+                            "content_type": "text/plain",
+                            "tags": derive_tags(original_url, keywords, include_change=True),
+                        }
+                        change_path = artifacts_dir / f"{change_artifact_id}.json"
+                        change_path.write_text(
+                            json.dumps(change_artifact, indent=2, sort_keys=True) + "\n",
+                            encoding="utf-8",
+                        )
+                        url_state["seen_ids"].append(change_artifact_id)
+                        total_changes += 1
 
             url_state["seen_ids"].append(artifact_id)
-            url_state["last_processed"] = timestamp
-            url_state["last_hash"] = content_hash
-            total_new += 1
+            if not change_checked:
+                url_state["last_processed"] = timestamp
+                url_state["last_hash"] = content_hash
+                url_state["last_snapshot_url"] = snapshot_url
+                change_checked = True
+            total_downloaded += 1
             remaining -= 1
             if remaining <= 0:
                 break
-            time.sleep(rate_limit)
 
     save_state(state_path, state)
 
+    if total_captures == 0:
+        print("No Wayback captures found in this run.")
+
     print(
-        "Wayback summary: "
-        f"urls={len(urls)} captures={total_captures} new={total_new} "
-        f"skipped={total_skipped} changes={total_changes}"
+        f"Wayback summary: urls={len(urls)} captures={total_captures} "
+        f"downloaded={total_downloaded} skipped={total_skipped} changes={total_changes}"
     )
+    return 0
 
 
 if __name__ == "__main__":
-    run()
+    try:
+        raise SystemExit(run())
+    except Exception as exc:
+        print(f"Wayback backfill failed: {exc}")
+        raise SystemExit(1)

@@ -24,8 +24,16 @@ urls = ["https://www.laruecounty.ky.gov/", "http://www.laruecountyherald.com/"]
 include_subpaths = false
 rate_limit_seconds = 1.0
 limit_per_run = 200
-high_impact_url_keywords = ["zoning","ordinance","minutes","agenda","budget","tax","contract","bid","election","rezon"]
+high_impact_url_keywords = ["zoning","ordinance","minutes","agenda","budget","tax","contract","bid","election","rezon","variance"]
 
 [sources.school_board]
 enabled = false
 base_url = ""
+
+[ai]
+enabled = false
+provider = "none"
+
+[publish]
+enabled = false
+provider = "none"

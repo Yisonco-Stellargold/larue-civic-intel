@@ -83,6 +83,10 @@ enum Commands {
         #[arg(long)]
         config: PathBuf,
     },
+    /// Placeholder for weekly AI digest generation
+    DigestWeekly,
+    /// Placeholder for publishing artifacts (e.g., Web3/static)
+    Publish,
 }
 
 #[derive(Subcommand)]
@@ -119,6 +123,8 @@ fn main() -> Result<()> {
         }
         Commands::RunWeekly { config } => run_weekly(config),
         Commands::ReportWeekly { config } => report_weekly(config),
+        Commands::DigestWeekly => digest_weekly(),
+        Commands::Publish => publish_placeholder(),
     }
 }
 
@@ -126,6 +132,8 @@ fn main() -> Result<()> {
 struct Config {
     storage: Option<StorageConfig>,
     sources: Option<SourcesConfig>,
+    ai: Option<AiConfig>,
+    publish: Option<PublishConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -155,6 +163,18 @@ struct WaybackConfig {
     limit_per_run: Option<usize>,
     include_subpaths: Option<bool>,
     high_impact_url_keywords: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AiConfig {
+    enabled: Option<bool>,
+    provider: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PublishConfig {
+    enabled: Option<bool>,
+    provider: Option<String>,
 }
 
 #[derive(Debug)]
@@ -761,6 +781,16 @@ fn report_weekly(config_path: PathBuf) -> Result<()> {
         artifacts.push(row?);
     }
 
+    let sort_key = |artifact: &&ReportArtifactRow| {
+        (
+            artifact.retrieved_at.clone(),
+            artifact
+                .title
+                .clone()
+                .unwrap_or_else(|| "(untitled)".to_string()),
+        )
+    };
+
     let report_dir = storage.vault_path.join("Reports").join("Weekly");
     fs::create_dir_all(&report_dir)?;
     let report_path = report_dir.join(format!("{date_str}.md"));
@@ -768,8 +798,10 @@ fn report_weekly(config_path: PathBuf) -> Result<()> {
     let mut markdown = String::new();
     markdown.push_str(&format!("# Weekly Report {date_str}\n\n"));
     markdown.push_str(&format!("Window: {window_start} to {window_end} UTC\n\n"));
-    let (high_impact, regular): (Vec<_>, Vec<_>) =
+    let (mut high_impact, mut regular): (Vec<_>, Vec<_>) =
         artifacts.iter().partition(|artifact| artifact.is_high_impact());
+    high_impact.sort_by_key(sort_key);
+    regular.sort_by_key(sort_key);
 
     markdown.push_str(&format!("Total artifacts: {}\n\n", artifacts.len()));
     markdown.push_str("## High Impact\n\n");
@@ -810,12 +842,14 @@ fn report_weekly(config_path: PathBuf) -> Result<()> {
         .join("weekly");
     fs::create_dir_all(&report_json_dir)?;
     let report_json_path = report_json_dir.join(format!("{date_str}.json"));
+    let ordered_artifacts: Vec<&ReportArtifactRow> =
+        high_impact.iter().chain(regular.iter()).copied().collect();
     let json_payload = serde_json::json!({
         "date": date_str,
         "window_start": window_start,
         "window_end": window_end,
         "total": artifacts.len(),
-        "artifacts": artifacts.iter().map(|artifact| {
+        "artifacts": ordered_artifacts.iter().map(|artifact| {
             serde_json::json!({
                 "id": artifact.id,
                 "title": artifact.title,
@@ -827,6 +861,16 @@ fn report_weekly(config_path: PathBuf) -> Result<()> {
     fs::write(&report_json_path, serde_json::to_string_pretty(&json_payload)?)?;
 
     println!("Weekly report written to {}", report_path.display());
+    Ok(())
+}
+
+fn digest_weekly() -> Result<()> {
+    println!("digest-weekly is not implemented yet.");
+    Ok(())
+}
+
+fn publish_placeholder() -> Result<()> {
+    println!("publish is not implemented yet.");
     Ok(())
 }
 
