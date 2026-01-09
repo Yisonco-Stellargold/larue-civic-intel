@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use schemars::schema_for;
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::path::Path;
@@ -83,6 +84,15 @@ enum Commands {
         #[arg(long)]
         config: PathBuf,
     },
+    /// Apply issue tagging to Artifact JSONs
+    TagArtifacts {
+        /// Config file path
+        #[arg(long)]
+        config: PathBuf,
+        /// Force re-tagging of previously tagged artifacts
+        #[arg(long)]
+        force: bool,
+    },
     /// Generate a weekly report (last 7 days) from the database
     ReportWeekly {
         /// Config file path
@@ -129,6 +139,7 @@ fn main() -> Result<()> {
         }
         Commands::RunWeekly { config } => run_weekly(config),
         Commands::ExtractText { config } => extract_text(config),
+        Commands::TagArtifacts { config, force } => tag_artifacts(config, force),
         Commands::ReportWeekly { config } => report_weekly(config),
         Commands::DigestWeekly => digest_weekly(),
         Commands::Publish => publish_placeholder(),
@@ -562,6 +573,10 @@ fn run_weekly(config_path: PathBuf) -> Result<()> {
         eprintln!("Warning: extract-text failed: {err}");
     }
 
+    if let Err(err) = tag_artifacts(config_path.clone(), false) {
+        eprintln!("Warning: tag-artifacts failed: {err}");
+    }
+
     report_weekly(config_path.clone())?;
     build_vault(&storage.db_path, storage.vault_path)?;
     Ok(())
@@ -798,6 +813,54 @@ fn extract_text(config_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn tag_artifacts(config_path: PathBuf, force: bool) -> Result<()> {
+    ensure_config_path(&config_path)?;
+    let python = find_python_interpreter()?;
+    let tagger_path = Path::new("workers/parsers/tag_artifacts.py");
+    if !tagger_path.exists() {
+        return Err(anyhow!(
+            "Tagging script not found: {}",
+            tagger_path.display()
+        ));
+    }
+
+    let config = load_config(&config_path)?;
+    let storage = resolve_storage(Some(&config));
+    let artifacts_dir = storage.out_dir.join("artifacts");
+
+    let mut command = Command::new(&python);
+    command
+        .arg(tagger_path)
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--artifacts")
+        .arg(&artifacts_dir);
+    if force {
+        command.arg("--force");
+    }
+
+    let output = command.output()?;
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("Tagging failed with status {}", output.status);
+        if !stdout.is_empty() {
+            eprintln!("Tagger stdout:\n{stdout}");
+        }
+        if !stderr.is_empty() {
+            eprintln!("Tagger stderr:\n{stderr}");
+        }
+        return Err(anyhow!("Tagging exited with failure"));
+    }
+
+    println!(
+        "Tagging completed for artifacts in {}",
+        artifacts_dir.display()
+    );
+    Ok(())
+}
+
 fn report_weekly(config_path: PathBuf) -> Result<()> {
     let config = load_config(&config_path)?;
     let storage = resolve_storage(Some(&config));
@@ -902,12 +965,29 @@ fn report_weekly(config_path: PathBuf) -> Result<()> {
         .iter()
         .filter(|artifact| artifact.is_text_extracted())
         .count();
+    let mut issue_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for artifact in &artifacts {
+        for tag in parse_tags_json(&artifact.tags_json) {
+            if is_issue_tag(&tag) {
+                *issue_counts.entry(tag).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut issue_counts_vec: Vec<(String, usize)> = issue_counts.into_iter().collect();
+    issue_counts_vec.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let issue_tag_counts = issue_counts_vec
+        .into_iter()
+        .take(10)
+        .map(|(tag, count)| serde_json::json!({ "tag": tag, "count": count }))
+        .collect::<Vec<_>>();
+
     let json_payload = serde_json::json!({
         "date": date_str,
         "window_start": window_start,
         "window_end": window_end,
         "total": artifacts.len(),
         "text_extracted_total": extracted_count,
+        "issue_tag_counts": issue_tag_counts,
         "artifacts": ordered_artifacts.iter().map(|artifact| {
             serde_json::json!({
                 "id": artifact.id,
@@ -944,12 +1024,47 @@ struct ReportArtifactRow {
 
 impl ReportArtifactRow {
     fn is_high_impact(&self) -> bool {
-        let tags: Vec<String> = serde_json::from_str(&self.tags_json).unwrap_or_default();
-        tags.iter().any(|tag| tag == "high_impact")
+        parse_tags_json(&self.tags_json)
+            .iter()
+            .any(|tag| tag == "high_impact")
     }
 
     fn is_text_extracted(&self) -> bool {
-        let tags: Vec<String> = serde_json::from_str(&self.tags_json).unwrap_or_default();
-        tags.iter().any(|tag| tag == "text_extracted")
+        parse_tags_json(&self.tags_json)
+            .iter()
+            .any(|tag| tag == "text_extracted")
     }
+}
+
+fn parse_tags_json(tags_json: &str) -> Vec<String> {
+    serde_json::from_str(tags_json).unwrap_or_default()
+}
+
+fn is_issue_tag(tag: &str) -> bool {
+    const ISSUE_TAGS: &[&str] = &[
+        "zoning",
+        "rezoning",
+        "variance",
+        "planning_commission",
+        "budget",
+        "tax",
+        "bond",
+        "appropriation",
+        "contract",
+        "bid",
+        "procurement",
+        "election",
+        "clerk",
+        "ballot",
+        "school_board",
+        "curriculum",
+        "policy",
+        "lawsuit",
+        "settlement",
+        "ordinance",
+        "public_safety",
+        "land_sale",
+        "eminent_domain",
+    ];
+    ISSUE_TAGS.iter().any(|issue| *issue == tag)
 }

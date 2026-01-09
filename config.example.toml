@@ -37,3 +37,14 @@ provider = "none"
 [publish]
 enabled = false
 provider = "none"
+
+[tagging]
+enabled = true
+min_hits_default = 1
+min_hits_broad = 2
+broad_tags = ["tax","budget","policy"]
+
+[tagging.tag_min_hits]
+tax = 2
+budget = 2
+contract = 1

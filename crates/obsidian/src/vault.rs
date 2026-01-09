@@ -1,5 +1,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
+use serde_json;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -61,10 +63,13 @@ pub fn build_vault(conn: &Connection, vault_root: &Path) -> Result<()> {
     index_lines.push("This index is generated. Do not edit manually.".to_string());
     index_lines.push(String::new());
 
+    let mut issue_counts: BTreeMap<String, usize> = BTreeMap::new();
+
     for r in rows {
         let a = r?;
         write_artifact_note(&paths, &a)?;
         index_lines.push(format!("- [[Artifacts/{}|{}]]", a.id, a.index_title()));
+        update_issue_counts(&a.tags_json, &mut issue_counts);
     }
 
     // 2) Write MOC
@@ -108,6 +113,55 @@ pub fn build_vault(conn: &Connection, vault_root: &Path) -> Result<()> {
 
     let meeting_moc_path = paths.index_dir.join("MOC - Meetings.md");
     fs::write(meeting_moc_path, meeting_index.join("\n"))?;
+
+    // 4) Write issue MOC
+    let mut issue_lines: Vec<String> = Vec::new();
+    issue_lines.push("# MOC - Issues".to_string());
+    issue_lines.push(String::new());
+    issue_lines.push("This index is generated. Do not edit manually.".to_string());
+    issue_lines.push(String::new());
+    issue_lines.push("## Weekly Reports".to_string());
+    issue_lines.push(String::new());
+
+    let reports_dir = paths.root.join("Reports").join("Weekly");
+    if reports_dir.exists() {
+        let mut report_links: Vec<String> = fs::read_dir(&reports_dir)?
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+                    return None;
+                }
+                let stem = path.file_stem()?.to_str()?.to_string();
+                Some(format!("- [[Reports/Weekly/{stem}|{stem}]]"))
+            })
+            .collect();
+        report_links.sort();
+        if report_links.is_empty() {
+            issue_lines.push("_No weekly reports found._".to_string());
+        } else {
+            issue_lines.extend(report_links);
+        }
+    } else {
+        issue_lines.push("_No weekly reports found._".to_string());
+    }
+
+    issue_lines.push(String::new());
+    issue_lines.push("## Issue Tags".to_string());
+    issue_lines.push(String::new());
+
+    let mut issue_counts_vec: Vec<(String, usize)> = issue_counts.into_iter().collect();
+    issue_counts_vec.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    if issue_counts_vec.is_empty() {
+        issue_lines.push("_No issue tags found._".to_string());
+    } else {
+        for (tag, count) in issue_counts_vec {
+            issue_lines.push(format!("- {tag} ({count})"));
+        }
+    }
+
+    let issue_moc_path = paths.index_dir.join("MOC - Issues.md");
+    fs::write(issue_moc_path, issue_lines.join("\n"))?;
 
     Ok(())
 }
@@ -220,4 +274,42 @@ fn indent_yaml_block(s: &str) -> String {
         // already added per line; this is fine
     }
     out
+}
+
+fn update_issue_counts(tags_json: &str, issue_counts: &mut BTreeMap<String, usize>) {
+    let tags: Vec<String> = serde_json::from_str(tags_json).unwrap_or_default();
+    for tag in tags {
+        if is_issue_tag(&tag) {
+            *issue_counts.entry(tag).or_insert(0) += 1;
+        }
+    }
+}
+
+fn is_issue_tag(tag: &str) -> bool {
+    const ISSUE_TAGS: &[&str] = &[
+        "zoning",
+        "rezoning",
+        "variance",
+        "planning_commission",
+        "budget",
+        "tax",
+        "bond",
+        "appropriation",
+        "contract",
+        "bid",
+        "procurement",
+        "election",
+        "clerk",
+        "ballot",
+        "school_board",
+        "curriculum",
+        "policy",
+        "lawsuit",
+        "settlement",
+        "ordinance",
+        "public_safety",
+        "land_sale",
+        "eminent_domain",
+    ];
+    ISSUE_TAGS.iter().any(|issue| *issue == tag)
 }
