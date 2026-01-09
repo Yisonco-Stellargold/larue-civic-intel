@@ -48,3 +48,13 @@ bounded `seen_ids`. Use `--resume` (default) to continue from the last processed
 
 When a new snapshot hash differs from the last run, the collector emits a deterministic change
 artifact titled \"Wayback change detected: <url>\" so edits are preserved without diffing.
+
+## Roadmap
+
+Planned interfaces (placeholders only; no live integrations yet):
+
+- `larue digest-weekly` will generate an AI-assisted weekly digest once the AI integration is
+  enabled.
+- `larue publish` will publish artifacts to a chosen backend (static/Web3) once publishing is
+  implemented.
+- Future config stubs live under `[ai]` and `[publish]` in `config.toml`.
