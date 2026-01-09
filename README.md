@@ -49,6 +49,18 @@ bounded `seen_ids`. Use `--resume` (default) to continue from the last processed
 When a new snapshot hash differs from the last run, the collector emits a deterministic change
 artifact titled \"Wayback change detected: <url>\" so edits are preserved without diffing.
 
+## Text Extraction & Normalization (Stage 1)
+
+The Stage 1 text extraction worker populates `body_text` in Artifact JSONs using deterministic
+HTML/plain-text normalization. Rust CLI integration will land in the next PR.
+
+Run the parser directly with:
+
+- `python workers/parsers/extract_text.py --config ./config.toml --artifacts <out_dir>/artifacts`
+
+The parser reads `storage.out_dir` from the config to locate snapshots under
+`<out_dir>/snapshots/**` and updates Artifact JSON files in-place.
+
 ## Roadmap
 
 Planned interfaces (placeholders only; no live integrations yet):
