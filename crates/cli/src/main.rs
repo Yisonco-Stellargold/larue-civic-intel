@@ -126,7 +126,6 @@ fn main() -> Result<()> {
 struct Config {
     storage: Option<StorageConfig>,
     sources: Option<SourcesConfig>,
-    importance: Option<ImportanceConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,7 +138,7 @@ struct StorageConfig {
 #[derive(Debug, Deserialize)]
 struct SourcesConfig {
     larue_fiscal_court: Option<SourceConfig>,
-    wayback: Option<SourceConfig>,
+    wayback: Option<WaybackConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -149,7 +148,12 @@ struct SourceConfig {
 }
 
 #[derive(Debug, Deserialize)]
-struct ImportanceConfig {
+struct WaybackConfig {
+    enabled: Option<bool>,
+    urls: Option<Vec<String>>,
+    rate_limit_seconds: Option<f32>,
+    limit_per_run: Option<usize>,
+    include_subpaths: Option<bool>,
     high_impact_url_keywords: Option<Vec<String>>,
 }
 

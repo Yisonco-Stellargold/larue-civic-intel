@@ -37,15 +37,14 @@ Generate a weekly report note and JSON summary with:
 
 ## Historical backfill (Wayback Machine)
 
-To backfill archived snapshots, enable the Wayback source in `config.toml` and run the collector
-in batches to respect rate limits:
+Enable the Wayback source in `config.toml` to backfill archived snapshots and detect quiet edits.
+Run in batches to respect the Internet Archive:
 
 - `python workers/collectors/wayback_backfill.py --config ./config.toml --limit 200`
 
-State is stored in `out/state/wayback_state.json` and records the last processed timestamp per
-configured URL plus a bounded set of seen capture IDs. Use `--resume` (default) to continue from
-the last processed timestamp, or pass `--start`/`--end` to override the time window. Keep the
-`rate_limit_seconds` setting in config to be a respectful client of the Internet Archive.
+State is stored in `out/state/wayback_state.json` with per-URL `last_processed`, `last_hash`, and
+bounded `seen_ids`. Use `--resume` (default) to continue from the last processed timestamp, or pass
+`--start`/`--end` to override the time window. Keep `rate_limit_seconds` conservative.
 
-Change detection records the latest snapshot hash per URL and emits a separate
-\"Wayback change detected\" artifact when the newest capture differs from the prior run.
+When a new snapshot hash differs from the last run, the collector emits a deterministic change
+artifact titled \"Wayback change detected: <url>\" so edits are preserved without diffing.
