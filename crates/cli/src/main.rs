@@ -77,6 +77,12 @@ enum Commands {
         #[arg(long)]
         config: PathBuf,
     },
+    /// Extract normalized text into Artifact JSONs
+    ExtractText {
+        /// Config file path
+        #[arg(long)]
+        config: PathBuf,
+    },
     /// Generate a weekly report (last 7 days) from the database
     ReportWeekly {
         /// Config file path
@@ -122,6 +128,7 @@ fn main() -> Result<()> {
             build_vault(&db_path, vault_path)
         }
         Commands::RunWeekly { config } => run_weekly(config),
+        Commands::ExtractText { config } => extract_text(config),
         Commands::ReportWeekly { config } => report_weekly(config),
         Commands::DigestWeekly => digest_weekly(),
         Commands::Publish => publish_placeholder(),
@@ -551,8 +558,12 @@ fn run_weekly(config_path: PathBuf) -> Result<()> {
         ingest_meeting_dir(meetings_dir, &storage.db_path)?;
     }
 
+    if let Err(err) = extract_text(config_path.clone()) {
+        eprintln!("Warning: extract-text failed: {err}");
+    }
+
+    report_weekly(config_path.clone())?;
     build_vault(&storage.db_path, storage.vault_path)?;
-    report_weekly(config_path)?;
     Ok(())
 }
 
@@ -744,6 +755,49 @@ fn find_python_interpreter() -> Result<String> {
     }
 }
 
+fn extract_text(config_path: PathBuf) -> Result<()> {
+    ensure_config_path(&config_path)?;
+    let python = find_python_interpreter()?;
+    let extractor_path = Path::new("workers/parsers/extract_text.py");
+    if !extractor_path.exists() {
+        return Err(anyhow!(
+            "Text extraction script not found: {}",
+            extractor_path.display()
+        ));
+    }
+
+    let config = load_config(&config_path)?;
+    let storage = resolve_storage(Some(&config));
+    let artifacts_dir = storage.out_dir.join("artifacts");
+
+    let output = Command::new(&python)
+        .arg(extractor_path)
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--artifacts")
+        .arg(&artifacts_dir)
+        .output()?;
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("Text extraction failed with status {}", output.status);
+        if !stdout.is_empty() {
+            eprintln!("Extractor stdout:\n{stdout}");
+        }
+        if !stderr.is_empty() {
+            eprintln!("Extractor stderr:\n{stderr}");
+        }
+        return Err(anyhow!("Text extraction exited with failure"));
+    }
+
+    println!(
+        "Text extraction completed for artifacts in {}",
+        artifacts_dir.display()
+    );
+    Ok(())
+}
+
 fn report_weekly(config_path: PathBuf) -> Result<()> {
     let config = load_config(&config_path)?;
     let storage = resolve_storage(Some(&config));
@@ -844,17 +898,23 @@ fn report_weekly(config_path: PathBuf) -> Result<()> {
     let report_json_path = report_json_dir.join(format!("{date_str}.json"));
     let ordered_artifacts: Vec<&ReportArtifactRow> =
         high_impact.iter().chain(regular.iter()).copied().collect();
+    let extracted_count = ordered_artifacts
+        .iter()
+        .filter(|artifact| artifact.is_text_extracted())
+        .count();
     let json_payload = serde_json::json!({
         "date": date_str,
         "window_start": window_start,
         "window_end": window_end,
         "total": artifacts.len(),
+        "text_extracted_total": extracted_count,
         "artifacts": ordered_artifacts.iter().map(|artifact| {
             serde_json::json!({
                 "id": artifact.id,
                 "title": artifact.title,
                 "retrieved_at": artifact.retrieved_at,
                 "source_value": artifact.source_value,
+                "extracted": artifact.is_text_extracted(),
             })
         }).collect::<Vec<_>>()
     });
@@ -886,5 +946,10 @@ impl ReportArtifactRow {
     fn is_high_impact(&self) -> bool {
         let tags: Vec<String> = serde_json::from_str(&self.tags_json).unwrap_or_default();
         tags.iter().any(|tag| tag == "high_impact")
+    }
+
+    fn is_text_extracted(&self) -> bool {
+        let tags: Vec<String> = serde_json::from_str(&self.tags_json).unwrap_or_default();
+        tags.iter().any(|tag| tag == "text_extracted")
     }
 }

@@ -52,7 +52,7 @@ artifact titled \"Wayback change detected: <url>\" so edits are preserved withou
 ## Text Extraction & Normalization (Stage 1)
 
 The Stage 1 text extraction worker populates `body_text` in Artifact JSONs using deterministic
-HTML/plain-text normalization. Rust CLI integration will land in the next PR.
+HTML/plain-text normalization.
 
 Run the parser directly with:
 
@@ -60,6 +60,14 @@ Run the parser directly with:
 
 The parser reads `storage.out_dir` from the config to locate snapshots under
 `<out_dir>/snapshots/**` and updates Artifact JSON files in-place.
+
+## Stage 2: extract-text integration
+
+The CLI wires the text extraction worker into the weekly pipeline. PDF extraction may be stubbed
+depending on optional dependencies.
+
+- `cargo run -p cli -- extract-text --config ./config.toml`
+- `cargo run -p cli -- run-weekly --config ./config.toml`
 
 ## Roadmap
 
