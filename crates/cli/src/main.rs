@@ -109,6 +109,12 @@ enum Commands {
         #[arg(long)]
         date: Option<String>,
     },
+    /// Export static site bundle
+    ExportSite {
+        /// Config file path
+        #[arg(long)]
+        config: PathBuf,
+    },
     /// Generate a weekly report (last 7 days) from the database
     ReportWeekly {
         /// Config file path
@@ -158,6 +164,7 @@ fn main() -> Result<()> {
         Commands::TagArtifacts { config, force } => tag_artifacts(config, force),
         Commands::IngestDecisions { config } => ingest_decisions(config),
         Commands::ScoreWeekly { config, date } => score_weekly(config, date),
+        Commands::ExportSite { config } => export_site(config),
         Commands::ReportWeekly { config } => report_weekly(config),
         Commands::DigestWeekly => digest_weekly(),
         Commands::Publish => publish_placeholder(),
@@ -170,6 +177,7 @@ struct Config {
     sources: Option<SourcesConfig>,
     ai: Option<AiConfig>,
     publish: Option<PublishConfig>,
+    site: Option<SiteConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -211,6 +219,12 @@ struct AiConfig {
 struct PublishConfig {
     enabled: Option<bool>,
     provider: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SiteConfig {
+    enable_commentary: Option<bool>,
+    commentary_style: Option<String>,
 }
 
 #[derive(Debug)]
@@ -603,6 +617,9 @@ fn run_weekly(config_path: PathBuf) -> Result<()> {
 
     report_weekly(config_path.clone())?;
     build_vault(&storage.db_path, storage.vault_path)?;
+    if let Err(err) = export_site(config_path.clone()) {
+        eprintln!("Warning: export-site failed: {err}");
+    }
     Ok(())
 }
 
@@ -1035,6 +1052,107 @@ fn score_weekly(config_path: PathBuf, date: Option<String>) -> Result<()> {
     Ok(())
 }
 
+fn export_site(config_path: PathBuf) -> Result<()> {
+    ensure_config_path(&config_path)?;
+    let config = load_config(&config_path)?;
+    let storage = resolve_storage(Some(&config));
+    let site = resolve_site_config(config.site.as_ref());
+    let rubric = Rubric::load_from_dir(Path::new("rubric")).ok();
+
+    let reports = load_week_reports(&storage.out_dir)?;
+    let latest_report = reports.last();
+    let (latest_date, window_start, window_end) = if let Some(report) = latest_report {
+        (
+            report.date.clone(),
+            report.window_start.clone(),
+            report.window_end.clone(),
+        )
+    } else {
+        resolve_window(None)?
+    };
+
+    let conn = civic_core::db::open(&storage.db_path)?;
+    let mut official_stats = load_official_summaries(
+        &conn,
+        &window_start,
+        &window_end,
+        rubric.as_ref(),
+        latest_report,
+    )?;
+    let previous_average = if reports.len() > 1 {
+        let previous_report = &reports[reports.len() - 2];
+        load_official_averages(&conn, &previous_report.window_start, &previous_report.window_end)?
+    } else {
+        HashMap::new()
+    };
+
+    for summary in &mut official_stats {
+        summary.delta = summary.average_score
+            - previous_average
+                .get(&summary.name)
+                .copied()
+                .unwrap_or(summary.average_score);
+        let prior_score = previous_average
+            .get(&summary.name)
+            .copied()
+            .unwrap_or(summary.average_score);
+        let prior_grade = score_to_grade(normalize_score(prior_score, rubric.as_ref().map(|rub| &rub.config)));
+        summary.commentary = build_commentary_line(
+            &summary.id,
+            &latest_date,
+            &summary.letter_grade,
+            &prior_grade.1,
+            summary.delta,
+            !summary.drift_flags.is_empty(),
+            &summary.top_issue_tags,
+            &site,
+        );
+    }
+
+    let site_dir = storage.out_dir.join("site");
+    let assets_dir = site_dir.join("assets");
+    let stockade_dir = site_dir.join("stockade");
+    let officials_dir = site_dir.join("officials");
+    let weeks_dir = site_dir.join("weeks");
+    let reports_dir = site_dir.join("reports").join("weekly");
+    let artifacts_dir = site_dir.join("artifacts");
+    fs::create_dir_all(&assets_dir)?;
+    fs::create_dir_all(&stockade_dir)?;
+    fs::create_dir_all(&officials_dir)?;
+    fs::create_dir_all(&weeks_dir)?;
+    fs::create_dir_all(&reports_dir)?;
+    fs::create_dir_all(&artifacts_dir)?;
+
+    write_site_assets(&assets_dir)?;
+    copy_report_jsons(&storage.out_dir, &reports_dir)?;
+    export_artifact_jsons(&storage.out_dir, &artifacts_dir)?;
+
+    let home_html = render_home_page(latest_report, &latest_date, &official_stats);
+    fs::write(site_dir.join("index.html"), home_html)?;
+
+    let stockade_html = render_stockade_page(&official_stats);
+    fs::write(stockade_dir.join("index.html"), stockade_html)?;
+
+    let officials_index = render_officials_index(&official_stats);
+    fs::write(officials_dir.join("index.html"), officials_index)?;
+
+    for official in &official_stats {
+        let detail_html = render_official_detail(official);
+        fs::write(
+            officials_dir.join(format!("{}.html", official.id)),
+            detail_html,
+        )?;
+    }
+
+    for report in &reports {
+        let week_html = render_week_page(report);
+        fs::write(weeks_dir.join(format!("{}.html", report.date)), week_html)?;
+    }
+
+    println!("Site export completed at {}", site_dir.display());
+    Ok(())
+}
+
 fn report_weekly(config_path: PathBuf) -> Result<()> {
     let config = load_config(&config_path)?;
     let storage = resolve_storage(Some(&config));
@@ -1349,6 +1467,55 @@ impl ScoreSummary {
             "drift_flags": self.drift_flags,
         })
     }
+}
+
+struct WeekReport {
+    date: String,
+    window_start: String,
+    window_end: String,
+    issue_tag_counts: Vec<(String, usize)>,
+    rubric_average: f64,
+    decisions: Vec<WeekDecision>,
+    artifacts: Vec<WeekArtifact>,
+}
+
+struct WeekDecision {
+    body_name: String,
+    started_at: String,
+    motions: Vec<WeekMotion>,
+}
+
+struct WeekMotion {
+    text: String,
+    result: Option<String>,
+}
+
+struct WeekArtifact {
+    title: String,
+    source_value: String,
+}
+
+struct OfficialSummary {
+    id: String,
+    name: String,
+    average_score: f64,
+    axis_scores: HashMap<String, f64>,
+    axis_scores_normalized: HashMap<String, f64>,
+    letter_grade: String,
+    numeric_grade: f64,
+    delta: f64,
+    drift_flags: Vec<String>,
+    insufficient: bool,
+    receipts: Vec<Receipt>,
+    top_issue_tags: Vec<String>,
+    commentary: Option<String>,
+}
+
+struct Receipt {
+    meeting_date: String,
+    motion_text: String,
+    artifact_ids: Vec<String>,
+    week_date: String,
 }
 
 impl ReportArtifactRow {
@@ -1882,6 +2049,908 @@ fn load_drift_flags(
         flags.push(format!("{official}: drift_detected:{axis} ({deviation:.2})"));
     }
     Ok(flags)
+}
+
+fn resolve_site_config(config: Option<&SiteConfig>) -> SiteConfig {
+    SiteConfig {
+        enable_commentary: Some(config.and_then(|value| value.enable_commentary).unwrap_or(true)),
+        commentary_style: config
+            .and_then(|value| value.commentary_style.clone())
+            .or(Some("satire".to_string())),
+    }
+}
+
+fn load_week_reports(out_dir: &Path) -> Result<Vec<WeekReport>> {
+    let reports_dir = out_dir.join("reports").join("weekly");
+    if !reports_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut reports: Vec<WeekReport> = Vec::new();
+    let mut entries: Vec<PathBuf> = fs::read_dir(&reports_dir)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .collect();
+    entries.sort();
+    for path in entries {
+        let raw = fs::read_to_string(&path)?;
+        let value: serde_json::Value = serde_json::from_str(&raw)?;
+        let Some(date) = value.get("date").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let window_start = value
+            .get("window_start")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+        let window_end = value
+            .get("window_end")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+        let issue_tag_counts = value
+            .get("issue_tag_counts")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        let tag = item.get("tag")?.as_str()?.to_string();
+                        let count = item.get("count")?.as_u64()? as usize;
+                        Some((tag, count))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let rubric_average = value
+            .get("rubric_alignment")
+            .and_then(|value| value.get("average_score"))
+            .and_then(|value| value.as_f64())
+            .unwrap_or(0.0);
+        let decisions = parse_week_decisions(&value);
+        let artifacts = value
+            .get("artifacts")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        Some(WeekArtifact {
+                            title: item
+                                .get("title")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("(untitled)")
+                                .to_string(),
+                            source_value: item
+                                .get("source_value")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        reports.push(WeekReport {
+            date: date.to_string(),
+            window_start,
+            window_end,
+            issue_tag_counts,
+            rubric_average,
+            decisions,
+            artifacts,
+        });
+    }
+    reports.sort_by(|a, b| a.date.cmp(&b.date));
+    Ok(reports)
+}
+
+fn parse_week_decisions(value: &serde_json::Value) -> Vec<WeekDecision> {
+    let decisions = value.get("decisions").and_then(|value| value.as_array());
+    let Some(decisions) = decisions else {
+        return Vec::new();
+    };
+    decisions
+        .iter()
+        .map(|decision| {
+            let body_name = decision
+                .get("body_name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("Unknown Body")
+                .to_string();
+            let started_at = decision
+                .get("started_at")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string();
+            let motions = decision
+                .get("motions")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| {
+                            Some(WeekMotion {
+                                text: item
+                                    .get("text")
+                                    .and_then(|value| value.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                result: item
+                                    .get("result")
+                                    .and_then(|value| value.as_str())
+                                    .map(|value| value.to_string()),
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            WeekDecision {
+                body_name,
+                started_at,
+                motions,
+            }
+        })
+        .collect()
+}
+
+fn load_official_summaries(
+    conn: &rusqlite::Connection,
+    window_start: &str,
+    window_end: &str,
+    rubric: Option<&Rubric>,
+    report: Option<&WeekReport>,
+) -> Result<Vec<OfficialSummary>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT decision_scores.overall_score, decision_scores.axis_json,
+               decision_scores.flags_json, decision_scores.evidence_json,
+               motions.text, meetings.started_at, meetings.artifact_ids_json
+        FROM decision_scores
+        JOIN motions ON decision_scores.motion_id = motions.id
+        JOIN meetings ON motions.meeting_id = meetings.id
+        WHERE decision_scores.vote_id IS NOT NULL
+          AND datetime(meetings.started_at) >= datetime(?1)
+          AND datetime(meetings.started_at) <= datetime(?2)
+        "#,
+    )?;
+
+    let rows = stmt.query_map([window_start, window_end], |row| {
+        let overall_score: f64 = row.get(0)?;
+        let axis_json: String = row.get(1)?;
+        let flags_json: String = row.get(2)?;
+        let evidence_json: String = row.get(3)?;
+        let motion_text: String = row.get(4)?;
+        let started_at: String = row.get(5)?;
+        let artifact_ids_json: String = row.get(6)?;
+        Ok((
+            overall_score,
+            axis_json,
+            flags_json,
+            evidence_json,
+            motion_text,
+            started_at,
+            artifact_ids_json,
+        ))
+    })?;
+
+    let mut data: HashMap<String, OfficialSummaryBuilder> = HashMap::new();
+    for row in rows {
+        let (
+            overall_score,
+            axis_json,
+            flags_json,
+            evidence_json,
+            motion_text,
+            started_at,
+            artifact_ids_json,
+        ) = row?;
+        let evidence: Vec<String> = serde_json::from_str(&evidence_json).unwrap_or_default();
+        let Some(official) = extract_official(&evidence) else {
+            continue;
+        };
+        let axis_scores: HashMap<String, f64> =
+            serde_json::from_str(&axis_json).unwrap_or_default();
+        let flags: Vec<String> = serde_json::from_str(&flags_json).unwrap_or_default();
+        let artifact_ids: Vec<String> =
+            serde_json::from_str(&artifact_ids_json).unwrap_or_default();
+
+        let entry = data.entry(official.clone()).or_insert_with(|| {
+            OfficialSummaryBuilder::new(&official, report)
+        });
+        entry.overall_scores.push(overall_score);
+        entry.axis_scores.push(axis_scores);
+        entry.insufficient |= flags.iter().any(|flag| flag == "insufficient_evidence");
+        entry.receipts.push(Receipt {
+            meeting_date: started_at.clone(),
+            motion_text: motion_text.clone(),
+            artifact_ids,
+            week_date: report.map(|rep| rep.date.clone()).unwrap_or_default(),
+        });
+    }
+
+    let drift_flags = load_drift_flags(conn, window_start, window_end)?;
+    let rubric_config = rubric.map(|value| &value.config);
+
+    let mut summaries = Vec::new();
+    for (_, builder) in data {
+        summaries.push(builder.build(rubric_config, &drift_flags));
+    }
+    summaries.sort_by(|a, b| {
+        b.average_score
+            .partial_cmp(&a.average_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    Ok(summaries)
+}
+
+fn load_official_averages(
+    conn: &rusqlite::Connection,
+    window_start: &str,
+    window_end: &str,
+) -> Result<HashMap<String, f64>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT decision_scores.overall_score, decision_scores.evidence_json
+        FROM decision_scores
+        WHERE vote_id IS NOT NULL
+          AND datetime(computed_at) >= datetime(?1)
+          AND datetime(computed_at) <= datetime(?2)
+        "#,
+    )?;
+    let rows = stmt.query_map([window_start, window_end], |row| {
+        let score: f64 = row.get(0)?;
+        let evidence_json: String = row.get(1)?;
+        Ok((score, evidence_json))
+    })?;
+    let mut totals: HashMap<String, Vec<f64>> = HashMap::new();
+    for row in rows {
+        let (score, evidence_json) = row?;
+        let evidence: Vec<String> = serde_json::from_str(&evidence_json).unwrap_or_default();
+        let Some(official) = extract_official(&evidence) else { continue };
+        totals.entry(official).or_default().push(score);
+    }
+    let mut averages = HashMap::new();
+    for (official, scores) in totals {
+        averages.insert(official, average(&scores));
+    }
+    Ok(averages)
+}
+
+fn export_artifact_jsons(out_dir: &Path, dest_dir: &Path) -> Result<()> {
+    let artifacts_dir = out_dir.join("artifacts");
+    if !artifacts_dir.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(&artifacts_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let raw = fs::read_to_string(&path)?;
+        let value: serde_json::Value = serde_json::from_str(&raw)?;
+        let Some(id) = value.get("id").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let dest = dest_dir.join(format!("{id}.json"));
+        fs::write(dest, serde_json::to_string_pretty(&value)?)?;
+    }
+    Ok(())
+}
+
+fn copy_report_jsons(out_dir: &Path, dest_dir: &Path) -> Result<()> {
+    let reports_dir = out_dir.join("reports").join("weekly");
+    if !reports_dir.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(&reports_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let filename = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
+        fs::copy(path, dest_dir.join(filename))?;
+    }
+    Ok(())
+}
+
+fn write_site_assets(assets_dir: &Path) -> Result<()> {
+    let css = r#"
+body { font-family: system-ui, sans-serif; margin: 0; background: #0f1215; color: #eef2f6; }
+header { background: #151a1f; padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; }
+nav a { color: #c6d4e1; margin-right: 1rem; text-decoration: none; }
+nav a:hover { color: #ffffff; }
+.container { max-width: 1100px; margin: 0 auto; padding: 2rem; }
+.card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; }
+.card { background: #1b222a; padding: 1rem; border-radius: 12px; }
+.badge { padding: 0.2rem 0.5rem; border-radius: 8px; font-size: 0.75rem; margin-right: 0.25rem; }
+.badge.rising { background: #1f6f3b; }
+.badge.falling { background: #7a2d2d; }
+.badge.drift { background: #875f1f; }
+.badge.insufficient { background: #4b4f57; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 0.6rem; border-bottom: 1px solid #27313b; }
+th { text-align: left; cursor: pointer; }
+a { color: #8dc3ff; }
+.sponsor { background: #ffcf56; color: #2b1a00; padding: 0.5rem 0.9rem; border-radius: 999px; text-decoration: none; font-weight: 600; }
+.subtitle { color: #9aa9b8; }
+footer { color: #9aa9b8; padding: 2rem; text-align: center; }
+    "#;
+    let js = r#"
+document.querySelectorAll('th[data-sort]').forEach((header) => {
+  header.addEventListener('click', () => {
+    const table = header.closest('table');
+    const tbody = table.querySelector('tbody');
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    const index = Array.from(header.parentNode.children).indexOf(header);
+    const direction = header.dataset.direction === 'asc' ? 'desc' : 'asc';
+    header.dataset.direction = direction;
+    rows.sort((a, b) => {
+      const aText = a.children[index].dataset.value || a.children[index].innerText;
+      const bText = b.children[index].dataset.value || b.children[index].innerText;
+      const aNum = parseFloat(aText);
+      const bNum = parseFloat(bText);
+      if (!Number.isNaN(aNum) && !Number.isNaN(bNum)) {
+        return direction === 'asc' ? aNum - bNum : bNum - aNum;
+      }
+      return direction === 'asc' ? aText.localeCompare(bText) : bText.localeCompare(aText);
+    });
+    rows.forEach((row) => tbody.appendChild(row));
+  });
+});
+    "#;
+    fs::write(assets_dir.join("style.css"), css.trim())?;
+    fs::write(assets_dir.join("app.js"), js.trim())?;
+    Ok(())
+}
+
+fn render_home_page(latest_report: Option<&WeekReport>, week_date: &str, officials: &[OfficialSummary]) -> String {
+    let avg_score = latest_report.map(|report| report.rubric_average).unwrap_or(0.0);
+    let drift_count = officials.iter().filter(|official| !official.drift_flags.is_empty()).count();
+    let top_tags = latest_report
+        .map(|report| {
+            report
+                .issue_tag_counts
+                .iter()
+                .take(3)
+                .map(|(tag, _)| tag.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let tag_list = if top_tags.is_empty() {
+        "_No tags yet_".to_string()
+    } else {
+        top_tags.join(", ")
+    };
+
+    let body = format!(
+        r#"
+<header>
+  <div>
+    <h1>LaRue Civic Intel</h1>
+    <div class="subtitle">Public Stockade Dashboard — Week of {week_date}</div>
+  </div>
+  <a class="sponsor" href="https://github.com/sponsors/Yisonco-Stellargold">Sponsor this project</a>
+</header>
+<div class="container">
+  <div class="card-grid">
+    <div class="card">
+      <h3>Fiscal Court</h3>
+      <p>Average score: {avg_score:.1}</p>
+      <p>Drift alerts: {drift_count}</p>
+      <p>Top issues: {tag_list}</p>
+      <p><a href="/weeks/{week_date}.html">View weekly summary →</a></p>
+    </div>
+    <div class="card">
+      <h3>Board of Education</h3>
+      <p class="subtitle">Placeholder until data exists.</p>
+    </div>
+    <div class="card">
+      <h3>Elections / Clerk</h3>
+      <p class="subtitle">Placeholder until data exists.</p>
+    </div>
+  </div>
+</div>
+<footer>Rubric-based scoring, conservative and auditable. Commentary is opinion/satire.</footer>
+"#
+    );
+    html_page("LaRue Civic Intel", &body)
+}
+
+fn render_stockade_page(officials: &[OfficialSummary]) -> String {
+    let rows = officials
+        .iter()
+        .map(|official| {
+            let trend_badge = if official.delta >= 5.0 {
+                "<span class=\"badge rising\">Rising</span>"
+            } else if official.delta <= -5.0 {
+                "<span class=\"badge falling\">Falling</span>"
+            } else {
+                ""
+            };
+            let drift_badge = if !official.drift_flags.is_empty() {
+                "<span class=\"badge drift\">Drift Alert</span>"
+            } else {
+                ""
+            };
+            let insufficient_badge = if official.insufficient {
+                "<span class=\"badge insufficient\">Insufficient Evidence</span>"
+            } else {
+                ""
+            };
+            let tags = if official.top_issue_tags.is_empty() {
+                "-".to_string()
+            } else {
+                official.top_issue_tags.join(", ")
+            };
+            format!(
+                r#"<tr>
+<td><a href="/officials/{id}.html">{name}</a></td>
+<td data-value="{numeric:.1}">{numeric:.1}</td>
+<td>{grade}</td>
+<td data-value="{delta:.1}">{delta:.1}</td>
+<td>{trend}{drift}{insufficient}</td>
+<td>{tags}</td>
+</tr>"#,
+                id = official.id,
+                name = official.name,
+                numeric = official.numeric_grade,
+                grade = official.letter_grade,
+                delta = official.delta,
+                trend = trend_badge,
+                drift = drift_badge,
+                insufficient = insufficient_badge,
+                tags = tags
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let body = format!(
+        r#"
+<header>
+  <nav>
+    <a href="/">Home</a>
+    <a href="/officials/index.html">Officials</a>
+  </nav>
+  <a class="sponsor" href="https://github.com/sponsors/Yisonco-Stellargold">Sponsor this project</a>
+</header>
+<div class="container">
+  <h2>Public Stockade</h2>
+  <table>
+    <thead>
+      <tr>
+        <th data-sort>Name</th>
+        <th data-sort>Score</th>
+        <th>Grade</th>
+        <th data-sort>Delta</th>
+        <th>Flags</th>
+        <th>Top Issues</th>
+      </tr>
+    </thead>
+    <tbody>
+      {rows}
+    </tbody>
+  </table>
+</div>
+<script src="/assets/app.js"></script>
+    "#
+    );
+    html_page("Public Stockade", &body)
+}
+
+fn render_officials_index(officials: &[OfficialSummary]) -> String {
+    let list = officials
+        .iter()
+        .map(|official| {
+            format!(
+                "<li><a href=\"/officials/{}.html\">{}</a> — {} ({:.1})</li>",
+                official.id, official.name, official.letter_grade, official.numeric_grade
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = format!(
+        r#"
+<header>
+  <nav>
+    <a href="/">Home</a>
+    <a href="/stockade/index.html">Stockade</a>
+  </nav>
+  <a class="sponsor" href="https://github.com/sponsors/Yisonco-Stellargold">Sponsor this project</a>
+</header>
+<div class="container">
+  <h2>Officials</h2>
+  <ul>
+    {list}
+  </ul>
+</div>
+    "#
+    );
+    html_page("Officials", &body)
+}
+
+fn render_official_detail(official: &OfficialSummary) -> String {
+    let axis_rows = official
+        .axis_scores_normalized
+        .iter()
+        .map(|(axis, score)| {
+            let (numeric, letter) = score_to_grade(*score);
+            format!(
+                "<tr><td>{axis}</td><td>{letter}</td><td>{numeric:.1}</td></tr>"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let receipts = official
+        .receipts
+        .iter()
+        .map(|receipt| {
+            let artifacts = if receipt.artifact_ids.is_empty() {
+                "_No artifacts_".to_string()
+            } else {
+                receipt
+                    .artifact_ids
+                    .iter()
+                    .map(|id| format!("<a href=\"/artifacts/{id}.json\">{id}</a>"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            format!(
+                "<li>{date}: {text} — <a href=\"/weeks/{week}.html\">weekly</a> — {artifacts}</li>",
+                date = receipt.meeting_date,
+                text = receipt.motion_text,
+                week = receipt.week_date,
+                artifacts = artifacts
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let commentary = official
+        .commentary
+        .as_deref()
+        .unwrap_or("No commentary generated.");
+
+    let body = format!(
+        r#"
+<header>
+  <nav>
+    <a href="/">Home</a>
+    <a href="/stockade/index.html">Stockade</a>
+  </nav>
+  <a class="sponsor" href="https://github.com/sponsors/Yisonco-Stellargold">Sponsor this project</a>
+</header>
+<div class="container">
+  <h2>{name}</h2>
+  <p>Overall grade: {grade} ({numeric:.1})</p>
+  <p>Trend: {delta:.1} vs last week</p>
+  <h3>Per-axis grades</h3>
+  <table>
+    <thead><tr><th>Axis</th><th>Grade</th><th>Score</th></tr></thead>
+    <tbody>{axis_rows}</tbody>
+  </table>
+
+  <h3>Receipts</h3>
+  <ul>{receipts}</ul>
+
+  <h3>Commentary</h3>
+  <p>{commentary}</p>
+  <p class="subtitle">Satire/opinion based on this project’s rubric scoring.</p>
+</div>
+    "#,
+        name = official.name,
+        grade = official.letter_grade,
+        numeric = official.numeric_grade,
+        axis_rows = axis_rows,
+        receipts = receipts,
+        commentary = commentary,
+        delta = official.delta
+    );
+    html_page(&format!("Official {}", official.name), &body)
+}
+
+fn render_week_page(report: &WeekReport) -> String {
+    let issue_tags = if report.issue_tag_counts.is_empty() {
+        "_No issue tags._".to_string()
+    } else {
+        report
+            .issue_tag_counts
+            .iter()
+            .map(|(tag, count)| format!("{tag} ({count})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let decisions = if report.decisions.is_empty() {
+        "_No decisions recorded._".to_string()
+    } else {
+        report
+            .decisions
+            .iter()
+            .map(|decision| {
+                let motions = decision
+                    .motions
+                    .iter()
+                    .map(|motion| {
+                        let outcome = motion
+                            .result
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_string());
+                        format!("<li>{} ({})</li>", motion.text, outcome)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "<div class=\"card\"><h4>{}</h4><ul>{}</ul></div>",
+                    decision.body_name, motions
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let artifacts = if report.artifacts.is_empty() {
+        "_No artifacts._".to_string()
+    } else {
+        report
+            .artifacts
+            .iter()
+            .map(|artifact| {
+                format!(
+                    "<li><a href=\"{url}\">{title}</a></li>",
+                    url = artifact.source_value,
+                    title = artifact.title
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let body = format!(
+        r#"
+<header>
+  <nav>
+    <a href="/">Home</a>
+    <a href="/stockade/index.html">Stockade</a>
+  </nav>
+  <a class="sponsor" href="https://github.com/sponsors/Yisonco-Stellargold">Sponsor this project</a>
+</header>
+<div class="container">
+  <h2>Week of {date}</h2>
+  <p>Window: {start} to {end}</p>
+  <h3>High-impact artifacts</h3>
+  <ul>{artifacts}</ul>
+  <h3>Decisions This Week</h3>
+  <div class="card-grid">{decisions}</div>
+  <h3>Rubric Alignment</h3>
+  <p>Average score: {avg:.1}</p>
+  <p>Issue tags: {issue_tags}</p>
+  <p><a href="/reports/weekly/{date}.json">Raw report JSON</a></p>
+</div>
+    "#,
+        date = report.date,
+        start = report.window_start,
+        end = report.window_end,
+        artifacts = artifacts,
+        decisions = decisions,
+        avg = report.rubric_average,
+        issue_tags = issue_tags
+    );
+    html_page(&format!("Week {}", report.date), &body)
+}
+
+fn html_page(title: &str, body: &str) -> String {
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{title}</title>
+  <link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body>
+{body}
+</body>
+</html>
+"#
+    )
+}
+
+fn build_commentary_line(
+    official_id: &str,
+    week_date: &str,
+    grade: &str,
+    prior_grade: &str,
+    delta: f64,
+    has_drift: bool,
+    tags: &[String],
+    site: &SiteConfig,
+) -> Option<String> {
+    if site.enable_commentary == Some(false) {
+        return None;
+    }
+    let style = site.commentary_style.clone().unwrap_or_else(|| "satire".to_string());
+    let seed = format!("{official_id}:{week_date}:{style}");
+    let grade_drop = grade_rank(prior_grade) - grade_rank(grade);
+    let grade_rise = grade_rank(grade) - grade_rank(prior_grade);
+    let templates = if delta <= -10.0 || grade_drop >= 1 {
+        vec![
+            "This week’s voting record earned a {grade}—not exactly a masterclass in restraint.",
+            "A {grade} this week. The numbers did the talking.",
+            "Scores slid to {grade}; the rubric isn’t feeling inspired.",
+        ]
+    } else if delta >= 10.0 || grade_rise >= 1 {
+        vec![
+            "Solid climb to a {grade}; keep it up and the trend becomes a pattern.",
+            "A jump to {grade}. Momentum looks real this week.",
+            "Score gains landed at {grade}; credit where it’s due.",
+        ]
+    } else {
+        vec![
+            "Steady at {grade}; the next votes will decide the direction.",
+            "Holding at {grade}. Consistency is the story for now.",
+            "No major shifts: {grade} with room to move.",
+        ]
+    };
+    let mut template = templates[stable_hash(&seed) as usize % templates.len()];
+    if style == "neutral" {
+        template = "Current grade is {grade}; see the weekly report for details.";
+    }
+    let mut line = template.replace("{grade}", grade);
+    if has_drift {
+        line.push_str(" Drift alerts are active.");
+    }
+    if !tags.is_empty() {
+        line.push_str(&format!(" Top issues: {}.", tags.join(", ")));
+    }
+    Some(line)
+}
+
+fn stable_hash(value: &str) -> u64 {
+    let mut hash: u64 = 14695981039346656037;
+    for byte in value.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    hash
+}
+
+fn score_to_grade(score: f64) -> (f64, String) {
+    let numeric = score.clamp(0.0, 100.0);
+    let grade = match numeric {
+        n if n >= 97.0 => "A+",
+        n if n >= 93.0 => "A",
+        n if n >= 90.0 => "A-",
+        n if n >= 87.0 => "B+",
+        n if n >= 83.0 => "B",
+        n if n >= 80.0 => "B-",
+        n if n >= 77.0 => "C+",
+        n if n >= 73.0 => "C",
+        n if n >= 70.0 => "C-",
+        n if n >= 67.0 => "D+",
+        n if n >= 63.0 => "D",
+        n if n >= 60.0 => "D-",
+        _ => "F",
+    };
+    (numeric, grade.to_string())
+}
+
+fn grade_rank(grade: &str) -> i32 {
+    match grade {
+        "A+" => 12,
+        "A" => 11,
+        "A-" => 10,
+        "B+" => 9,
+        "B" => 8,
+        "B-" => 7,
+        "C+" => 6,
+        "C" => 5,
+        "C-" => 4,
+        "D+" => 3,
+        "D" => 2,
+        "D-" => 1,
+        _ => 0,
+    }
+}
+
+struct OfficialSummaryBuilder {
+    id: String,
+    name: String,
+    overall_scores: Vec<f64>,
+    axis_scores: Vec<HashMap<String, f64>>,
+    receipts: Vec<Receipt>,
+    insufficient: bool,
+    top_issue_tags: Vec<String>,
+}
+
+impl OfficialSummaryBuilder {
+    fn new(name: &str, report: Option<&WeekReport>) -> Self {
+        let id = slugify(name);
+        let top_issue_tags = report
+            .map(|value| {
+                value
+                    .issue_tag_counts
+                    .iter()
+                    .take(3)
+                    .map(|(tag, _)| tag.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Self {
+            id,
+            name: name.to_string(),
+            overall_scores: Vec::new(),
+            axis_scores: Vec::new(),
+            receipts: Vec::new(),
+            insufficient: false,
+            top_issue_tags,
+        }
+    }
+
+    fn build(
+        self,
+        rubric_config: Option<&civic_core::scoring::RubricConfig>,
+        drift_flags: &[String],
+    ) -> OfficialSummary {
+        let average_score = average(&self.overall_scores);
+        let axis_scores = average_axis_scores(&self.axis_scores);
+        let axis_scores_normalized = axis_scores
+            .iter()
+            .map(|(axis, score)| (axis.clone(), normalize_score(*score, rubric_config)))
+            .collect::<HashMap<_, _>>();
+        let numeric_score = normalize_score(average_score, rubric_config);
+        let (numeric_grade, letter_grade) = score_to_grade(numeric_score);
+        let drift = drift_flags
+            .iter()
+            .filter(|flag| flag.starts_with(&self.name))
+            .cloned()
+            .collect::<Vec<_>>();
+        OfficialSummary {
+            id: self.id,
+            name: self.name,
+            average_score,
+            axis_scores,
+            axis_scores_normalized,
+            letter_grade,
+            numeric_grade,
+            delta: 0.0,
+            drift_flags: drift,
+            insufficient: self.insufficient,
+            receipts: self.receipts,
+            top_issue_tags: self.top_issue_tags,
+            commentary: None,
+        }
+    }
+}
+
+fn normalize_score(score: f64, rubric_config: Option<&civic_core::scoring::RubricConfig>) -> f64 {
+    let Some(config) = rubric_config else {
+        return score.clamp(0.0, 100.0);
+    };
+    let floor = config.general.score_floor;
+    let ceiling = config.general.score_ceiling;
+    if (ceiling - floor).abs() < f64::EPSILON {
+        return config.general.neutral_score;
+    }
+    let normalized = ((score - floor) / (ceiling - floor)) * 100.0;
+    normalized.clamp(0.0, 100.0)
+}
+
+fn average_axis_scores(values: &[HashMap<String, f64>]) -> HashMap<String, f64> {
+    let mut totals: HashMap<String, Vec<f64>> = HashMap::new();
+    for map in values {
+        for (axis, value) in map {
+            totals.entry(axis.clone()).or_default().push(*value);
+        }
+    }
+    let mut averages = HashMap::new();
+    for (axis, scores) in totals {
+        averages.insert(axis, average(&scores));
+    }
+    averages
 }
 
 fn is_issue_tag(tag: &str) -> bool {

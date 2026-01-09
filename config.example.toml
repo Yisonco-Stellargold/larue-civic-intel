@@ -38,6 +38,10 @@ provider = "none"
 enabled = false
 provider = "none"
 
+[site]
+enable_commentary = true
+commentary_style = "satire"
+
 [tagging]
 enabled = true
 min_hits_default = 1

@@ -90,6 +90,27 @@ provide strong matches.
 - Run scoring manually with:
   - `cargo run -p cli -- score-weekly --config ./config.toml`
 
+## MVP Website Export (Stage 6)
+
+The static site export is deterministic and based on rubric scoring and source records. Commentary
+is opinion/satire derived from scores and includes explicit disclaimers; it is not a factual claim.
+
+- Generate the site bundle:
+  - `cargo run -p cli -- export-site --config ./config.toml`
+
+TODO: Replace the template-based commentary generator with a future LLM provider via the existing
+`[ai]` stubs.
+
+## Free Weekly Automation (GitHub Actions + Pages)
+
+This repository includes a weekly GitHub Actions workflow that runs the pipeline and publishes the
+static site to GitHub Pages. Update `config.toml` or the workflow if you need different sources.
+
+Disclaimers:
+- Scoring is rubric-based and conservative; insufficient evidence yields neutral scores.
+- Commentary is opinion/satire tied to score changes and public records.
+- Always link back to primary sources for auditability.
+
 ## Roadmap
 
 Planned interfaces (placeholders only; no live integrations yet):
