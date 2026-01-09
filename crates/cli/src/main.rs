@@ -93,6 +93,12 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Ingest parsed decision JSON files into SQLite
+    IngestDecisions {
+        /// Config file path
+        #[arg(long)]
+        config: PathBuf,
+    },
     /// Generate a weekly report (last 7 days) from the database
     ReportWeekly {
         /// Config file path
@@ -140,6 +146,7 @@ fn main() -> Result<()> {
         Commands::RunWeekly { config } => run_weekly(config),
         Commands::ExtractText { config } => extract_text(config),
         Commands::TagArtifacts { config, force } => tag_artifacts(config, force),
+        Commands::IngestDecisions { config } => ingest_decisions(config),
         Commands::ReportWeekly { config } => report_weekly(config),
         Commands::DigestWeekly => digest_weekly(),
         Commands::Publish => publish_placeholder(),
@@ -563,18 +570,20 @@ fn run_weekly(config_path: PathBuf) -> Result<()> {
     let artifacts_dir = storage.out_dir.join("artifacts");
     ingest_dir(artifacts_dir.clone(), &storage.db_path)?;
 
-    if fiscal_court_enabled(&config) {
-        parse_meetings(&python, &storage, artifacts_dir)?;
-        let meetings_dir = storage.out_dir.join("meetings");
-        ingest_meeting_dir(meetings_dir, &storage.db_path)?;
-    }
-
     if let Err(err) = extract_text(config_path.clone()) {
         eprintln!("Warning: extract-text failed: {err}");
     }
 
     if let Err(err) = tag_artifacts(config_path.clone(), false) {
         eprintln!("Warning: tag-artifacts failed: {err}");
+    }
+
+    if let Err(err) = parse_meetings(&python, &config_path, &storage) {
+        eprintln!("Warning: parse-meetings failed: {err}");
+    }
+
+    if let Err(err) = ingest_decisions(config_path.clone()) {
+        eprintln!("Warning: ingest-decisions failed: {err}");
     }
 
     report_weekly(config_path.clone())?;
@@ -630,94 +639,39 @@ fn run_fiscal_court_collector(python: &str, config_path: &PathBuf) -> Result<()>
     Ok(())
 }
 
-fn parse_meetings(python: &str, storage: &ResolvedStorage, artifacts_dir: PathBuf) -> Result<()> {
-    let snapshots_dir = storage.out_dir.join("snapshots");
-    let meetings_dir = storage.out_dir.join("meetings");
-    fs::create_dir_all(&meetings_dir)?;
-
-    let mut snapshot_map = std::collections::HashMap::new();
-    if snapshots_dir.exists() {
-        for entry in fs::read_dir(&snapshots_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
-                snapshot_map.insert(stem.to_string(), path);
-            }
-        }
+fn parse_meetings(
+    python: &str,
+    config_path: &PathBuf,
+    storage: &ResolvedStorage,
+) -> Result<()> {
+    let parser_path = Path::new("workers/parsers/parse_meeting_minutes.py");
+    if !parser_path.exists() {
+        return Err(anyhow!(
+            "Meeting parser script not found: {}",
+            parser_path.display()
+        ));
     }
 
-    if !artifacts_dir.exists() {
-        return Ok(());
-    }
+    let artifacts_dir = storage.out_dir.join("artifacts");
+    let output = Command::new(python)
+        .arg(parser_path)
+        .arg("--config")
+        .arg(config_path)
+        .arg("--artifacts")
+        .arg(&artifacts_dir)
+        .output()?;
 
-    for entry in fs::read_dir(&artifacts_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("Meeting parser failed with status {}", output.status);
+        if !stdout.is_empty() {
+            eprintln!("Parser stdout:\n{stdout}");
         }
-        let raw = fs::read_to_string(&path)?;
-        let raw_json: serde_json::Value = serde_json::from_str(&raw)?;
-        let tags = raw_json
-            .get("tags")
-            .and_then(|value| value.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let tag_set: Vec<String> = tags
-            .iter()
-            .filter_map(|value| value.as_str().map(|s| s.to_string()))
-            .collect();
-        if !tag_set.iter().any(|tag| tag == "meeting")
-            || !tag_set.iter().any(|tag| tag == "fiscal_court")
-        {
-            continue;
+        if !stderr.is_empty() {
+            eprintln!("Parser stderr:\n{stderr}");
         }
-
-        let stem = match path.file_stem().and_then(|value| value.to_str()) {
-            Some(stem) => stem.to_string(),
-            None => continue,
-        };
-        let snapshot_path = match snapshot_map.get(&stem) {
-            Some(path) => path,
-            None => {
-                eprintln!("Missing snapshot for artifact {}", path.display());
-                continue;
-            }
-        };
-
-        let parser_path = Path::new("workers/parsers/parse_meeting_minutes.py");
-        if !parser_path.exists() {
-            return Err(anyhow!(
-                "Meeting parser script not found: {}",
-                parser_path.display()
-            ));
-        }
-
-        let output = Command::new(python)
-            .arg(parser_path)
-            .arg("--artifact")
-            .arg(&path)
-            .arg("--snapshot")
-            .arg(snapshot_path)
-            .arg("--out-dir")
-            .arg(&storage.out_dir)
-            .output()?;
-
-        if !output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!(
-                "Meeting parser failed for {} with status {}",
-                path.display(),
-                output.status
-            );
-            if !stdout.is_empty() {
-                eprintln!("Parser stdout:\n{stdout}");
-            }
-            if !stderr.is_empty() {
-                eprintln!("Parser stderr:\n{stderr}");
-            }
-        }
+        return Err(anyhow!("Meeting parser exited with failure"));
     }
     Ok(())
 }
@@ -861,6 +815,95 @@ fn tag_artifacts(config_path: PathBuf, force: bool) -> Result<()> {
     Ok(())
 }
 
+fn ingest_decisions(config_path: PathBuf) -> Result<()> {
+    ensure_config_path(&config_path)?;
+    let config = load_config(&config_path)?;
+    let storage = resolve_storage(Some(&config));
+    let decisions_dir = storage.out_dir.join("decisions");
+
+    if !decisions_dir.exists() {
+        println!("No decisions directory found at {}", decisions_dir.display());
+        return Ok(());
+    }
+
+    let mut decision_files: Vec<PathBuf> = fs::read_dir(&decisions_dir)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .collect();
+    decision_files.sort();
+
+    if decision_files.is_empty() {
+        println!("No decision JSON files found in {}", decisions_dir.display());
+        return Ok(());
+    }
+
+    let conn = civic_core::db::open(&storage.db_path)?;
+    let mut ingested = 0usize;
+    let mut failed = 0usize;
+
+    for path in decision_files {
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                failed += 1;
+                eprintln!("Failed to read {}: {err}", path.display());
+                continue;
+            }
+        };
+        let raw_json: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(raw_json) => raw_json,
+            Err(err) => {
+                failed += 1;
+                eprintln!("Failed to parse {}: {err}", path.display());
+                continue;
+            }
+        };
+        let decision: civic_core::schema::DecisionBundle = match serde_json::from_value(raw_json.clone()) {
+            Ok(decision) => decision,
+            Err(err) => {
+                failed += 1;
+                eprintln!("Decision schema mismatch in {}: {err}", path.display());
+                continue;
+            }
+        };
+
+        if let Err(err) = civic_core::db::upsert_decision_meeting(
+            &conn,
+            &decision.meeting,
+            &raw_json,
+            &decision.motions,
+        ) {
+            failed += 1;
+            eprintln!("Failed to ingest meeting {}: {err}", path.display());
+            continue;
+        }
+
+        for motion in &decision.motions {
+            let motion_json = serde_json::to_value(motion)?;
+            if let Err(err) = civic_core::db::upsert_motion(&conn, motion, &motion_json) {
+                failed += 1;
+                eprintln!("Failed to ingest motion {}: {err}", motion.id);
+            }
+        }
+        for vote in &decision.votes {
+            let vote_json = serde_json::to_value(vote)?;
+            if let Err(err) = civic_core::db::upsert_vote(&conn, vote, &vote_json) {
+                failed += 1;
+                eprintln!("Failed to ingest vote {}: {err}", vote.id);
+            }
+        }
+        ingested += 1;
+    }
+
+    println!(
+        "Ingested {} decision files, {} failed in {}",
+        ingested,
+        failed,
+        decisions_dir.display()
+    );
+    Ok(())
+}
+
 fn report_weekly(config_path: PathBuf) -> Result<()> {
     let config = load_config(&config_path)?;
     let storage = resolve_storage(Some(&config));
@@ -920,6 +963,8 @@ fn report_weekly(config_path: PathBuf) -> Result<()> {
     high_impact.sort_by_key(sort_key);
     regular.sort_by_key(sort_key);
 
+    let decisions = load_decisions(&conn, &window_start, &window_end)?;
+
     markdown.push_str(&format!("Total artifacts: {}\n\n", artifacts.len()));
     markdown.push_str("## High Impact\n\n");
     if high_impact.is_empty() {
@@ -950,6 +995,26 @@ fn report_weekly(config_path: PathBuf) -> Result<()> {
             "- [{title}]({}) — {}\n",
             artifact.source_value, artifact.retrieved_at
         ));
+    }
+    markdown.push('\n');
+
+    markdown.push_str("## Decisions This Week\n\n");
+    if decisions.is_empty() {
+        markdown.push_str("_No decisions parsed this week._\n");
+    } else {
+        for meeting in &decisions {
+            markdown.push_str(&format!(
+                "- {} — {}\n",
+                meeting.started_at, meeting.body_name
+            ));
+            for motion in &meeting.motions {
+                let outcome = motion
+                    .result
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
+                markdown.push_str(&format!("  - {} ({})\n", motion.text, outcome));
+            }
+        }
     }
     fs::write(&report_path, markdown)?;
 
@@ -988,6 +1053,21 @@ fn report_weekly(config_path: PathBuf) -> Result<()> {
         "total": artifacts.len(),
         "text_extracted_total": extracted_count,
         "issue_tag_counts": issue_tag_counts,
+        "decisions": decisions.iter().map(|meeting| {
+            serde_json::json!({
+                "meeting_id": meeting.id,
+                "body_id": meeting.body_id,
+                "body_name": meeting.body_name,
+                "started_at": meeting.started_at,
+                "motions": meeting.motions.iter().map(|motion| {
+                    serde_json::json!({
+                        "id": motion.id,
+                        "text": motion.text,
+                        "result": motion.result,
+                    })
+                }).collect::<Vec<_>>()
+            })
+        }).collect::<Vec<_>>(),
         "artifacts": ordered_artifacts.iter().map(|artifact| {
             serde_json::json!({
                 "id": artifact.id,
@@ -1022,6 +1102,20 @@ struct ReportArtifactRow {
     tags_json: String,
 }
 
+struct ReportDecisionMotion {
+    id: String,
+    text: String,
+    result: Option<String>,
+}
+
+struct ReportDecisionMeeting {
+    id: String,
+    body_id: String,
+    body_name: String,
+    started_at: String,
+    motions: Vec<ReportDecisionMotion>,
+}
+
 impl ReportArtifactRow {
     fn is_high_impact(&self) -> bool {
         parse_tags_json(&self.tags_json)
@@ -1038,6 +1132,56 @@ impl ReportArtifactRow {
 
 fn parse_tags_json(tags_json: &str) -> Vec<String> {
     serde_json::from_str(tags_json).unwrap_or_default()
+}
+
+fn load_decisions(
+    conn: &rusqlite::Connection,
+    window_start: &str,
+    window_end: &str,
+) -> Result<Vec<ReportDecisionMeeting>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT meetings.id, meetings.body_id, meetings.started_at, bodies.name
+        FROM meetings
+        JOIN bodies ON meetings.body_id = bodies.id
+        WHERE datetime(meetings.started_at) >= datetime(?1)
+          AND datetime(meetings.started_at) <= datetime(?2)
+        ORDER BY meetings.started_at ASC, meetings.id ASC
+        "#,
+    )?;
+
+    let meetings = stmt.query_map([window_start, window_end], |row| {
+        Ok(ReportDecisionMeeting {
+            id: row.get(0)?,
+            body_id: row.get(1)?,
+            started_at: row.get(2)?,
+            body_name: row.get(3)?,
+            motions: Vec::new(),
+        })
+    })?;
+
+    let mut results = Vec::new();
+    for meeting in meetings {
+        let mut meeting = meeting?;
+        let mut motion_stmt = conn.prepare(
+            r#"
+            SELECT id, text, result
+            FROM motions
+            WHERE meeting_id = ?1
+            ORDER BY motion_index ASC, id ASC
+            "#,
+        )?;
+        let motions = motion_stmt.query_map([meeting.id.as_str()], |row| {
+            Ok(ReportDecisionMotion {
+                id: row.get(0)?,
+                text: row.get(1)?,
+                result: row.get(2)?,
+            })
+        })?;
+        meeting.motions = motions.filter_map(|row| row.ok()).collect();
+        results.push(meeting);
+    }
+    Ok(results)
 }
 
 fn is_issue_tag(tag: &str) -> bool {

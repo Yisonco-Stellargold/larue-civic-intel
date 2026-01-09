@@ -114,7 +114,10 @@ pub fn build_vault(conn: &Connection, vault_root: &Path) -> Result<()> {
     let meeting_moc_path = paths.index_dir.join("MOC - Meetings.md");
     fs::write(meeting_moc_path, meeting_index.join("\n"))?;
 
-    // 4) Write issue MOC
+    // 4) Write decision meeting notes
+    write_decision_meeting_notes(conn, &paths)?;
+
+    // 5) Write issue MOC
     let mut issue_lines: Vec<String> = Vec::new();
     issue_lines.push("# MOC - Issues".to_string());
     issue_lines.push(String::new());
@@ -274,6 +277,116 @@ fn indent_yaml_block(s: &str) -> String {
         // already added per line; this is fine
     }
     out
+}
+
+#[derive(Debug)]
+struct DecisionMeetingRow {
+    id: String,
+    body_id: String,
+    body_name: String,
+    started_at: String,
+    artifact_ids_json: String,
+}
+
+#[derive(Debug)]
+struct DecisionMotionRow {
+    id: String,
+    meeting_id: String,
+    text: String,
+    result: Option<String>,
+    index: i64,
+}
+
+fn write_decision_meeting_notes(conn: &Connection, paths: &VaultPaths) -> Result<()> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT meetings.id, meetings.body_id, meetings.started_at, meetings.artifact_ids_json, bodies.name
+        FROM meetings
+        JOIN bodies ON meetings.body_id = bodies.id
+        ORDER BY meetings.started_at DESC, meetings.id DESC
+        "#,
+    )?;
+    let meetings = stmt.query_map([], |row| {
+        Ok(DecisionMeetingRow {
+            id: row.get(0)?,
+            body_id: row.get(1)?,
+            started_at: row.get(2)?,
+            artifact_ids_json: row.get(3)?,
+            body_name: row.get(4)?,
+        })
+    })?;
+
+    for row in meetings {
+        let meeting = row?;
+        let date = meeting
+            .started_at
+            .split('T')
+            .next()
+            .unwrap_or(&meeting.started_at);
+        let filename = format!("{date}-{}.md", meeting.body_id);
+        let note_path = paths.meetings_dir.join(filename);
+
+        let mut motion_stmt = conn.prepare(
+            r#"
+            SELECT id, meeting_id, text, result, motion_index
+            FROM motions
+            WHERE meeting_id = ?1
+            ORDER BY motion_index ASC, id ASC
+            "#,
+        )?;
+        let motions = motion_stmt.query_map([meeting.id.as_str()], |row| {
+            Ok(DecisionMotionRow {
+                id: row.get(0)?,
+                meeting_id: row.get(1)?,
+                text: row.get(2)?,
+                result: row.get(3)?,
+                index: row.get(4)?,
+            })
+        })?;
+
+        let mut md = String::new();
+        md.push_str("---\n");
+        md.push_str(&format!("id: {}\n", meeting.id));
+        md.push_str(&format!("body_id: {}\n", meeting.body_id));
+        md.push_str(&format!("body_name: {}\n", meeting.body_name));
+        md.push_str(&format!("started_at: {}\n", meeting.started_at));
+        md.push_str("artifact_ids_json: |\n");
+        md.push_str(&indent_yaml_block(&meeting.artifact_ids_json));
+        md.push_str("---\n\n");
+
+        md.push_str(&format!("# {} — {}\n\n", meeting.body_name, date));
+        md.push_str("## Motions\n");
+
+        let mut has_motions = false;
+        for motion in motions {
+            let motion = motion?;
+            has_motions = true;
+            let result = motion.result.unwrap_or_else(|| "unknown".to_string());
+            md.push_str(&format!(
+                "- {} ({})\n",
+                motion.text.trim(),
+                result
+            ));
+        }
+        if !has_motions {
+            md.push_str("_No motions recorded._\n");
+        }
+
+        md.push_str("\n## Source Artifacts\n");
+        let artifact_ids: Vec<String> = serde_json::from_str(&meeting.artifact_ids_json)
+            .unwrap_or_default();
+        if artifact_ids.is_empty() {
+            md.push_str("_No source artifacts recorded._\n");
+        } else {
+            for artifact_id in artifact_ids {
+                md.push_str(&format!("- [[Artifacts/{artifact_id}|{artifact_id}]]\n"));
+            }
+        }
+
+        fs::write(note_path, md)?;
+    }
+
+    Ok(())
 }
 
 fn update_issue_counts(tags_json: &str, issue_counts: &mut BTreeMap<String, usize>) {

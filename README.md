@@ -69,6 +69,16 @@ depending on optional dependencies.
 - `cargo run -p cli -- extract-text --config ./config.toml`
 - `cargo run -p cli -- run-weekly --config ./config.toml`
 
+## Meeting & Decision Extraction (Stage 4)
+
+Meeting parsing is conservative and focused on LaRue County Fiscal Court artifacts with clear
+structure. It relies on extracted text and issue tags, and may skip ambiguous documents to avoid
+false positives.
+
+- `python workers/parsers/parse_meeting_minutes.py --config ./config.toml --artifacts <out_dir>/artifacts`
+- `cargo run -p cli -- ingest-decisions --config ./config.toml`
+- `cargo run -p cli -- run-weekly --config ./config.toml`
+
 ## Roadmap
 
 Planned interfaces (placeholders only; no live integrations yet):
