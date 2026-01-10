@@ -1059,9 +1059,8 @@ fn export_site(config_path: PathBuf) -> Result<()> {
     let site = resolve_site_config(config.site.as_ref());
     let rubric = Rubric::load_from_dir(Path::new("rubric")).ok();
 
-    let reports = load_week_reports(&storage.out_dir)?;
-    let latest_report = reports.last();
-    let (latest_date, window_start, window_end) = if let Some(report) = latest_report {
+    let mut reports = load_week_reports(&storage.out_dir)?;
+    let (latest_date, window_start, window_end) = if let Some(report) = reports.last() {
         (
             report.date.clone(),
             report.window_start.clone(),
@@ -1070,6 +1069,10 @@ fn export_site(config_path: PathBuf) -> Result<()> {
     } else {
         resolve_window(None)?
     };
+    if reports.is_empty() {
+        reports.push(build_placeholder_report(&latest_date, &window_start, &window_end));
+    }
+    let latest_report = reports.last();
 
     let conn = civic_core::db::open(&storage.db_path)?;
     let mut official_stats = load_official_summaries(
@@ -1078,6 +1081,7 @@ fn export_site(config_path: PathBuf) -> Result<()> {
         &window_end,
         rubric.as_ref(),
         latest_report,
+        &latest_date,
     )?;
     let previous_average = if reports.len() > 1 {
         let previous_report = &reports[reports.len() - 2];
@@ -2144,6 +2148,18 @@ fn load_week_reports(out_dir: &Path) -> Result<Vec<WeekReport>> {
     Ok(reports)
 }
 
+fn build_placeholder_report(date: &str, window_start: &str, window_end: &str) -> WeekReport {
+    WeekReport {
+        date: date.to_string(),
+        window_start: window_start.to_string(),
+        window_end: window_end.to_string(),
+        issue_tag_counts: Vec::new(),
+        rubric_average: 0.0,
+        decisions: Vec::new(),
+        artifacts: Vec::new(),
+    }
+}
+
 fn parse_week_decisions(value: &serde_json::Value) -> Vec<WeekDecision> {
     let decisions = value.get("decisions").and_then(|value| value.as_array());
     let Some(decisions) = decisions else {
@@ -2199,6 +2215,7 @@ fn load_official_summaries(
     window_end: &str,
     rubric: Option<&Rubric>,
     report: Option<&WeekReport>,
+    week_date: &str,
 ) -> Result<Vec<OfficialSummary>> {
     let mut stmt = conn.prepare(
         r#"
@@ -2254,9 +2271,9 @@ fn load_official_summaries(
         let artifact_ids: Vec<String> =
             serde_json::from_str(&artifact_ids_json).unwrap_or_default();
 
-        let entry = data.entry(official.clone()).or_insert_with(|| {
-            OfficialSummaryBuilder::new(&official, report)
-        });
+        let entry = data
+            .entry(official.clone())
+            .or_insert_with(|| OfficialSummaryBuilder::new(&official, report, week_date));
         entry.overall_scores.push(overall_score);
         entry.axis_scores.push(axis_scores);
         entry.insufficient |= flags.iter().any(|flag| flag == "insufficient_evidence");
@@ -2264,7 +2281,9 @@ fn load_official_summaries(
             meeting_date: started_at.clone(),
             motion_text: motion_text.clone(),
             artifact_ids,
-            week_date: report.map(|rep| rep.date.clone()).unwrap_or_default(),
+            week_date: report
+                .map(|rep| rep.date.clone())
+                .unwrap_or_else(|| week_date.to_string()),
         });
     }
 
@@ -2867,7 +2886,7 @@ struct OfficialSummaryBuilder {
 }
 
 impl OfficialSummaryBuilder {
-    fn new(name: &str, report: Option<&WeekReport>) -> Self {
+    fn new(name: &str, report: Option<&WeekReport>, _week_date: &str) -> Self {
         let id = slugify(name);
         let top_issue_tags = report
             .map(|value| {
