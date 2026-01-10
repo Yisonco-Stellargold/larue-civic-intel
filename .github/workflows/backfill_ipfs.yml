@@ -7,10 +7,10 @@ on:
         description: "Max snapshots to fetch this run"
         required: false
         default: "25"
-      rate_limit_seconds:
-        description: "Delay between Wayback requests"
-        required: false
-        default: "1"
+      #rate_limit_seconds:
+      #  description: "Delay between Wayback requests"
+      #  required: false
+      #  default: "1"
       run_pipeline:
         description: "Run full pipeline after backfill"
         required: false
@@ -74,8 +74,7 @@ jobs:
         run: |
           python workers/collectors/wayback_backfill.py \
             --config config/ci.toml \
-            --limit "${{ inputs.limit }}" \
-            --rate-limit-seconds "${{ inputs.rate_limit_seconds }}"
+            --limit "${{ inputs.limit }}"
 
       - name: Run weekly pipeline
         if: ${{ inputs.run_pipeline == 'true' }}
