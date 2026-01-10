@@ -47,31 +47,26 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      # IMPORTANT: continue-on-error must be a step-level key (and reliably honored).
-      - name: Restore prior state artifact (optional)
-        continue-on-error: true
-        uses: actions/download-artifact@v4
+      # Cache-based state restore (never fails if empty).
+      - name: Restore backfill state cache (optional)
+        id: state-cache
+        uses: actions/cache@v4
         with:
-          name: larue-state
-          path: .tmp/larue-state
+          path: |
+            out/state
+            out/artifacts
+          key: larue-state-${{ github.run_id }}
+          restore-keys: |
+            larue-state-
 
-      - name: Restore state directories (if present)
+      - name: Ensure state dirs exist
         shell: bash
         run: |
           mkdir -p out/state out/artifacts
-
-          if [ -d ".tmp/larue-state" ] && [ "$(ls -A .tmp/larue-state 2>/dev/null | wc -l)" -gt 0 ]; then
-            echo "Found prior larue-state artifact. Restoring..."
-
-            if [ -d ".tmp/larue-state/out/state" ]; then
-              cp -R .tmp/larue-state/out/state/* out/state/ || true
-            fi
-
-            if [ -d ".tmp/larue-state/out/artifacts" ]; then
-              cp -R .tmp/larue-state/out/artifacts/* out/artifacts/ || true
-            fi
+          if [ "${{ steps.state-cache.outputs.cache-hit }}" = "true" ]; then
+            echo "Restored prior state from cache."
           else
-            echo "No prior larue-state artifact found (first run). Continuing."
+            echo "No prior state cache found (first run). Continuing."
           fi
 
       - name: Run Wayback backfill
@@ -105,26 +100,24 @@ jobs:
       - name: Write IPFS metadata
         shell: bash
         run: |
-          # ipshipyard/ipfs-deploy-action typically outputs `cid`, but if that ever changes
-          # we want a clear error rather than silently writing empty metadata.
           CID="${{ steps.ipfs.outputs.cid }}"
           if [ -z "${CID}" ]; then
             echo "ERROR: IPFS CID output was empty. Check the 'Pin site to IPFS' step outputs."
             exit 1
           fi
-
           DATE="$(date -u +%F)"
           echo "Pinned CID: ${CID}"
           printf '{\n  "cid": "%s",\n  "date": "%s",\n  "source": "github_actions_backfill_ipfs"\n}\n' "${CID}" "${DATE}" > out/site/ipfs.json
 
-      - name: Upload state artifact
+      # Optional: upload artifacts for human inspection/debug (not required for restore anymore).
+      - name: Upload state snapshot artifact
         uses: actions/upload-artifact@v4
         with:
-          name: larue-state
+          name: larue-state-snapshot
           path: |
             out/state
             out/artifacts
-          retention-days: 30
+          retention-days: 14
 
       - name: Upload IPFS metadata
         uses: actions/upload-artifact@v4
@@ -132,4 +125,3 @@ jobs:
           name: ipfs-metadata
           path: out/site/ipfs.json
           retention-days: 30
-
