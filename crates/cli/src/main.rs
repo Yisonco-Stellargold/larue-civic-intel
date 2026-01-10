@@ -1151,14 +1151,14 @@ fn export_site(config_path: PathBuf) -> Result<()> {
     let home_html = render_home_page(latest_report, &latest_date, &official_stats);
     fs::write(site_dir.join("index.html"), home_html)?;
 
-    let stockade_html = render_stockade_page(&official_stats);
+    let stockade_html = render_stockade_page(&official_stats, &latest_date);
     fs::write(stockade_dir.join("index.html"), stockade_html)?;
 
-    let officials_index = render_officials_index(&official_stats);
+    let officials_index = render_officials_index(&official_stats, &latest_date);
     fs::write(officials_dir.join("index.html"), officials_index)?;
 
     for official in &official_stats {
-        let detail_html = render_official_detail(official);
+        let detail_html = render_official_detail(official, &latest_date);
         fs::write(
             officials_dir.join(format!("{}.html", official.id)),
             detail_html,
@@ -1166,7 +1166,7 @@ fn export_site(config_path: PathBuf) -> Result<()> {
     }
 
     for report in &reports {
-        let week_html = render_week_page(report);
+        let week_html = render_week_page(report, &latest_date);
         fs::write(weeks_dir.join(format!("{}.html", report.date)), week_html)?;
     }
 
@@ -2434,25 +2434,65 @@ fn copy_report_jsons(out_dir: &Path, dest_dir: &Path) -> Result<()> {
 
 fn write_site_assets(assets_dir: &Path) -> Result<()> {
     let css = r#"
-body { font-family: system-ui, sans-serif; margin: 0; background: #0f1215; color: #eef2f6; }
-header { background: #151a1f; padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; }
-nav a { color: #c6d4e1; margin-right: 1rem; text-decoration: none; }
-nav a:hover { color: #ffffff; }
-.container { max-width: 1100px; margin: 0 auto; padding: 2rem; }
-.card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; }
-.card { background: #1b222a; padding: 1rem; border-radius: 12px; }
-.badge { padding: 0.2rem 0.5rem; border-radius: 8px; font-size: 0.75rem; margin-right: 0.25rem; }
-.badge.rising { background: #1f6f3b; }
-.badge.falling { background: #7a2d2d; }
-.badge.drift { background: #875f1f; }
-.badge.insufficient { background: #4b4f57; }
-table { width: 100%; border-collapse: collapse; }
-th, td { padding: 0.6rem; border-bottom: 1px solid #27313b; }
-th { text-align: left; cursor: pointer; }
-a { color: #8dc3ff; }
-.sponsor { background: #ffcf56; color: #2b1a00; padding: 0.5rem 0.9rem; border-radius: 999px; text-decoration: none; font-weight: 600; }
-.subtitle { color: #9aa9b8; }
-footer { color: #9aa9b8; padding: 2rem; text-align: center; }
+* { box-sizing: border-box; }
+body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background: #0b0f14; color: #ecf1f6; line-height: 1.5; }
+a { color: #8dc3ff; text-decoration: none; }
+a:hover { color: #c2ddff; }
+.site-header { background: #0f1620; border-bottom: 1px solid #1d2733; position: sticky; top: 0; z-index: 10; }
+.nav-inner { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.8rem 1.5rem; max-width: 1200px; margin: 0 auto; }
+.nav-brand { display: flex; align-items: center; gap: 0.75rem; font-weight: 700; letter-spacing: 0.02em; }
+.nav-links { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+.nav-links a { color: #c7d2df; font-size: 0.95rem; }
+.nav-links a:hover { color: #ffffff; }
+.nav-search { display: flex; align-items: center; gap: 0.5rem; background: #111923; border: 1px solid #243244; border-radius: 999px; padding: 0.35rem 0.75rem; min-width: 220px; }
+.nav-search input { background: transparent; border: none; color: #d6e2f0; width: 100%; font-size: 0.85rem; }
+.nav-search input:disabled { color: #708299; }
+.container { max-width: 1200px; margin: 0 auto; padding: 2rem 1.5rem 3rem; }
+.hero { background: linear-gradient(135deg, #1c2735 0%, #142030 55%, #0f1620 100%); border: 1px solid #1f2b3a; border-radius: 18px; padding: 1.5rem; display: grid; gap: 1.25rem; }
+.hero-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem; }
+.hero-title { margin: 0; font-size: 1.6rem; }
+.hero-subtitle { color: #9fb0c4; margin: 0.3rem 0 0; }
+.stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.75rem; }
+.stat { background: #121a25; border: 1px solid #1f2b3a; border-radius: 12px; padding: 0.9rem; }
+.stat-label { font-size: 0.8rem; color: #9fb0c4; }
+.stat-value { font-size: 1.3rem; font-weight: 600; margin-top: 0.2rem; }
+.card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; margin-top: 1.5rem; }
+.card { background: #111923; border: 1px solid #1d2836; border-radius: 16px; padding: 1.2rem; box-shadow: 0 10px 30px rgba(6, 10, 16, 0.35); display: flex; flex-direction: column; gap: 0.8rem; }
+.card-title { display: flex; align-items: center; gap: 0.6rem; font-size: 1.05rem; margin: 0; }
+.chip-row { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.chip { background: #1a2432; border: 1px solid #243244; padding: 0.2rem 0.55rem; border-radius: 999px; font-size: 0.75rem; color: #c8d5e4; }
+.badge { padding: 0.2rem 0.6rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600; display: inline-flex; align-items: center; gap: 0.3rem; }
+.badge.rising { background: rgba(68, 171, 99, 0.18); color: #7de7a5; border: 1px solid rgba(68, 171, 99, 0.4); }
+.badge.falling { background: rgba(196, 69, 69, 0.18); color: #ff9c9c; border: 1px solid rgba(196, 69, 69, 0.4); }
+.badge.drift { background: rgba(210, 140, 46, 0.2); color: #ffd18b; border: 1px solid rgba(210, 140, 46, 0.4); }
+.badge.insufficient { background: rgba(115, 129, 148, 0.2); color: #b6c2d3; border: 1px solid rgba(115, 129, 148, 0.4); }
+.badge.grade-a { background: rgba(78, 197, 139, 0.18); color: #7ff0b0; border: 1px solid rgba(78, 197, 139, 0.4); }
+.badge.grade-b { background: rgba(119, 190, 255, 0.18); color: #9dd2ff; border: 1px solid rgba(119, 190, 255, 0.4); }
+.badge.grade-c { background: rgba(240, 190, 78, 0.2); color: #ffd38a; border: 1px solid rgba(240, 190, 78, 0.4); }
+.badge.grade-d { background: rgba(255, 140, 84, 0.18); color: #ffc2a3; border: 1px solid rgba(255, 140, 84, 0.4); }
+.badge.grade-f { background: rgba(217, 80, 80, 0.18); color: #ffb3b3; border: 1px solid rgba(217, 80, 80, 0.4); }
+.table-wrap { overflow-x: auto; border: 1px solid #1d2836; border-radius: 14px; margin-top: 1rem; }
+table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
+thead th { position: sticky; top: 0; background: #0f1620; color: #c4d2e3; text-align: left; padding: 0.75rem; border-bottom: 1px solid #1d2836; }
+tbody tr:nth-child(even) { background: rgba(17, 25, 35, 0.6); }
+td { padding: 0.75rem; border-bottom: 1px solid #1d2836; vertical-align: top; }
+.sort-hint { font-size: 0.8rem; color: #8ea2b8; margin-top: 0.5rem; }
+.score-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; }
+.score-card { background: #121a25; border: 1px solid #1f2b3a; border-radius: 14px; padding: 1rem; }
+.receipts details { background: #111923; border: 1px solid #1d2836; border-radius: 12px; padding: 0.75rem 1rem; margin-bottom: 0.6rem; }
+.receipts summary { cursor: pointer; font-weight: 600; }
+.clean-list { list-style: none; padding-left: 0; margin: 0; display: grid; gap: 0.6rem; }
+.footer { border-top: 1px solid #1d2836; padding: 2rem 1.5rem; background: #0f1620; color: #9fb0c4; }
+.footer-inner { max-width: 1200px; margin: 0 auto; display: flex; flex-direction: column; gap: 0.8rem; }
+.footer-links { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; }
+.btn { background: #ffcf56; color: #2b1a00; padding: 0.45rem 0.9rem; border-radius: 999px; font-weight: 700; }
+.subtitle { color: #9fb0c4; }
+.icon { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+@media (max-width: 720px) {
+  .nav-inner { flex-direction: column; align-items: stretch; }
+  .nav-links { justify-content: space-between; }
+  .nav-search { width: 100%; }
+}
     "#;
     let js = r#"
 document.querySelectorAll('th[data-sort]').forEach((header) => {
@@ -2482,9 +2522,17 @@ document.querySelectorAll('th[data-sort]').forEach((header) => {
     Ok(())
 }
 
-fn render_home_page(latest_report: Option<&WeekReport>, week_date: &str, officials: &[OfficialSummary]) -> String {
+fn render_home_page(
+    latest_report: Option<&WeekReport>,
+    week_date: &str,
+    officials: &[OfficialSummary],
+) -> String {
     let avg_score = latest_report.map(|report| report.rubric_average).unwrap_or(0.0);
     let drift_count = officials.iter().filter(|official| !official.drift_flags.is_empty()).count();
+    let flagged_count = officials
+        .iter()
+        .filter(|official| official.insufficient || !official.drift_flags.is_empty())
+        .count();
     let top_tags = latest_report
         .map(|report| {
             report
@@ -2496,85 +2544,152 @@ fn render_home_page(latest_report: Option<&WeekReport>, week_date: &str, officia
         })
         .unwrap_or_default();
 
-    let tag_list = if top_tags.is_empty() {
-        "_No tags yet_".to_string()
+    let tag_chips = if top_tags.is_empty() {
+        "<span class=\"subtitle\">No tags yet.</span>".to_string()
     } else {
-        top_tags.join(", ")
+        top_tags
+            .into_iter()
+            .map(|tag| format!("<span class=\"chip\">{tag}</span>"))
+            .collect::<Vec<_>>()
+            .join("")
     };
+
+    let (avg_numeric, avg_grade) = score_to_grade(avg_score);
+    let hero = format!(
+        r#"
+<section class="hero">
+  <div class="hero-header">
+    <div>
+      <h1 class="hero-title">Weekly Brief</h1>
+      <p class="hero-subtitle">Week of {week_date}</p>
+    </div>
+    <a class="btn" href="/weeks/{week_date}.html">View weekly page →</a>
+  </div>
+  <div class="stats-row">
+    <div class="stat">
+      <div class="stat-label">Artifacts ingested</div>
+      <div class="stat-value">{artifact_count}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Decisions recorded</div>
+      <div class="stat-value">{decision_count}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Flagged signals</div>
+      <div class="stat-value">{flagged_count}</div>
+    </div>
+  </div>
+</section>
+"#,
+        week_date = week_date,
+        artifact_count = latest_report.map(|report| report.artifacts.len()).unwrap_or(0),
+        decision_count = latest_report.map(|report| report.decisions.len()).unwrap_or(0),
+        flagged_count = flagged_count
+    );
 
     let body = format!(
         r#"
-<header>
-  <div>
-    <h1>LaRue Civic Intel</h1>
-    <div class="subtitle">Public Stockade Dashboard — Week of {week_date}</div>
-  </div>
-  <a class="sponsor" href="https://github.com/sponsors/Yisonco-Stellargold">Sponsor this project</a>
-</header>
-<div class="container">
-  <div class="card-grid">
-    <div class="card">
-      <h3>Fiscal Court</h3>
-      <p>Average score: {avg_score:.1}</p>
-      <p>Drift alerts: {drift_count}</p>
-      <p>Top issues: {tag_list}</p>
-      <p><a href="/weeks/{week_date}.html">View weekly summary →</a></p>
+{nav}
+<main class="container">
+  {hero}
+  <section>
+    <h2>Governing body dashboards</h2>
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-title">{icon_court} Fiscal Court</div>
+        <div>
+          <span class="badge grade-{grade_class}">{avg_grade}</span>
+          <span class="subtitle">Avg score {avg_numeric:.1}</span>
+        </div>
+        <div class="chip-row">
+          <span class="chip">Drift alerts: {drift_count}</span>
+        </div>
+        <div class="chip-row">{tag_chips}</div>
+        <a href="/stockade/index.html">View details →</a>
+      </div>
+      <div class="card">
+        <div class="card-title">{icon_cap} Board of Education</div>
+        <p class="subtitle">Placeholder until data exists.</p>
+      </div>
+      <div class="card">
+        <div class="card-title">{icon_ballot} Elections / Clerk</div>
+        <p class="subtitle">Placeholder until data exists.</p>
+      </div>
     </div>
-    <div class="card">
-      <h3>Board of Education</h3>
-      <p class="subtitle">Placeholder until data exists.</p>
-    </div>
-    <div class="card">
-      <h3>Elections / Clerk</h3>
-      <p class="subtitle">Placeholder until data exists.</p>
-    </div>
-  </div>
-</div>
-<footer>Rubric-based scoring, conservative and auditable. Commentary is opinion/satire.</footer>
-"#
+  </section>
+</main>
+{footer}
+"#,
+        nav = nav_html(week_date),
+        footer = footer_html(week_date),
+        hero = hero,
+        icon_court = icon_court(),
+        icon_cap = icon_cap(),
+        icon_ballot = icon_ballot(),
+        avg_numeric = avg_numeric,
+        avg_grade = avg_grade,
+        grade_class = grade_class(&avg_grade),
+        drift_count = drift_count,
+        tag_chips = tag_chips
     );
     html_page("LaRue Civic Intel", &body)
 }
 
-fn render_stockade_page(officials: &[OfficialSummary]) -> String {
+fn render_stockade_page(officials: &[OfficialSummary], week_date: &str) -> String {
     let rows = officials
         .iter()
         .map(|official| {
             let trend_badge = if official.delta >= 5.0 {
-                "<span class=\"badge rising\">Rising</span>"
+                format!(
+                    "<span class=\"badge rising\">{} Rising</span>",
+                    icon_trend_up()
+                )
             } else if official.delta <= -5.0 {
-                "<span class=\"badge falling\">Falling</span>"
+                format!(
+                    "<span class=\"badge falling\">{} Falling</span>",
+                    icon_trend_down()
+                )
             } else {
-                ""
+                String::new()
             };
             let drift_badge = if !official.drift_flags.is_empty() {
-                "<span class=\"badge drift\">Drift Alert</span>"
+                format!("<span class=\"badge drift\">{} Drift</span>", icon_alert())
             } else {
-                ""
+                String::new()
             };
             let insufficient_badge = if official.insufficient {
-                "<span class=\"badge insufficient\">Insufficient Evidence</span>"
+                format!(
+                    "<span class=\"badge insufficient\">{} Insufficient</span>",
+                    icon_info()
+                )
             } else {
-                ""
+                String::new()
             };
             let tags = if official.top_issue_tags.is_empty() {
                 "-".to_string()
             } else {
-                official.top_issue_tags.join(", ")
+                official
+                    .top_issue_tags
+                    .iter()
+                    .map(|tag| format!("<span class=\"chip\">{tag}</span>"))
+                    .collect::<Vec<_>>()
+                    .join("")
             };
+            let grade_class = grade_class(&official.letter_grade);
             format!(
                 r#"<tr>
 <td><a href="/officials/{id}.html">{name}</a></td>
 <td data-value="{numeric:.1}">{numeric:.1}</td>
-<td>{grade}</td>
+<td><span class="badge grade-{grade_class}">{grade}</span></td>
 <td data-value="{delta:.1}">{delta:.1}</td>
-<td>{trend}{drift}{insufficient}</td>
-<td>{tags}</td>
+<td><div class="chip-row">{trend}{drift}{insufficient}</div></td>
+<td><div class="chip-row">{tags}</div></td>
 </tr>"#,
                 id = official.id,
                 name = official.name,
                 numeric = official.numeric_grade,
                 grade = official.letter_grade,
+                grade_class = grade_class,
                 delta = official.delta,
                 trend = trend_badge,
                 drift = drift_badge,
@@ -2587,69 +2702,76 @@ fn render_stockade_page(officials: &[OfficialSummary]) -> String {
 
     let body = format!(
         r#"
-<header>
-  <nav>
-    <a href="/">Home</a>
-    <a href="/officials/index.html">Officials</a>
-  </nav>
-  <a class="sponsor" href="https://github.com/sponsors/Yisonco-Stellargold">Sponsor this project</a>
-</header>
-<div class="container">
+{nav}
+<main class="container">
   <h2>Public Stockade</h2>
-  <table>
-    <thead>
-      <tr>
-        <th data-sort>Name</th>
-        <th data-sort>Score</th>
-        <th>Grade</th>
-        <th data-sort>Delta</th>
-        <th>Flags</th>
-        <th>Top Issues</th>
-      </tr>
-    </thead>
-    <tbody>
-      {rows}
-    </tbody>
-  </table>
-</div>
+  <p class="subtitle">Leaderboard sorted by current score. Click headers to sort.</p>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th data-sort>Name</th>
+          <th data-sort>Score</th>
+          <th>Grade</th>
+          <th data-sort>Delta</th>
+          <th>Status</th>
+          <th>Top Issues</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows}
+      </tbody>
+    </table>
+  </div>
+  <div class="sort-hint">Tip: click column headers to sort.</div>
+</main>
+{footer}
 <script src="/assets/app.js"></script>
     "#
+    ,
+        nav = nav_html(week_date),
+        footer = footer_html(week_date)
     );
     html_page("Public Stockade", &body)
 }
 
-fn render_officials_index(officials: &[OfficialSummary]) -> String {
+fn render_officials_index(officials: &[OfficialSummary], week_date: &str) -> String {
     let list = officials
         .iter()
         .map(|official| {
+            let grade_class = grade_class(&official.letter_grade);
             format!(
-                "<li><a href=\"/officials/{}.html\">{}</a> — {} ({:.1})</li>",
-                official.id, official.name, official.letter_grade, official.numeric_grade
+                "<li><a href=\"/officials/{id}.html\">{name}</a> <span class=\"badge grade-{grade_class}\">{grade}</span> <span class=\"subtitle\">{score:.1}</span></li>",
+                id = official.id,
+                name = official.name,
+                grade = official.letter_grade,
+                grade_class = grade_class,
+                score = official.numeric_grade
             )
         })
         .collect::<Vec<_>>()
         .join("\n");
     let body = format!(
         r#"
-<header>
-  <nav>
-    <a href="/">Home</a>
-    <a href="/stockade/index.html">Stockade</a>
-  </nav>
-  <a class="sponsor" href="https://github.com/sponsors/Yisonco-Stellargold">Sponsor this project</a>
-</header>
-<div class="container">
+{nav}
+<main class="container">
   <h2>Officials</h2>
-  <ul>
-    {list}
-  </ul>
-</div>
+  <div class="card">
+    <ul class="clean-list">
+      {list}
+    </ul>
+  </div>
+</main>
+{footer}
     "#
+    ,
+        nav = nav_html(week_date),
+        footer = footer_html(week_date)
     );
     html_page("Officials", &body)
 }
 
-fn render_official_detail(official: &OfficialSummary) -> String {
+fn render_official_detail(official: &OfficialSummary, week_date: &str) -> String {
     let axis_rows = official
         .axis_scores_normalized
         .iter()
@@ -2662,75 +2784,129 @@ fn render_official_detail(official: &OfficialSummary) -> String {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let receipts = official
-        .receipts
-        .iter()
-        .map(|receipt| {
-            let artifacts = if receipt.artifact_ids.is_empty() {
-                "_No artifacts_".to_string()
-            } else {
-                receipt
-                    .artifact_ids
-                    .iter()
-                    .map(|id| format!("<a href=\"/artifacts/{id}.json\">{id}</a>"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            format!(
-                "<li>{date}: {text} — <a href=\"/weeks/{week}.html\">weekly</a> — {artifacts}</li>",
-                date = receipt.meeting_date,
-                text = receipt.motion_text,
-                week = receipt.week_date,
-                artifacts = artifacts
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let trend = if official.delta >= 5.0 {
+        format!("{} Rising", icon_trend_up())
+    } else if official.delta <= -5.0 {
+        format!("{} Falling", icon_trend_down())
+    } else {
+        format!("{} Stable", icon_info())
+    };
+
+    let mut flags = Vec::new();
+    if !official.drift_flags.is_empty() {
+        flags.push(format!("<span class=\"badge drift\">{} Drift</span>", icon_alert()));
+    }
+    if official.insufficient {
+        flags.push(format!(
+            "<span class=\"badge insufficient\">{} Insufficient evidence</span>",
+            icon_info()
+        ));
+    }
+    let flags = if flags.is_empty() {
+        "<span class=\"subtitle\">No flags</span>".to_string()
+    } else {
+        flags.join("")
+    };
+
+    let receipts = if official.receipts.is_empty() {
+        "<p class=\"subtitle\">No receipts recorded.</p>".to_string()
+    } else {
+        official
+            .receipts
+            .iter()
+            .map(|receipt| {
+                let artifacts = if receipt.artifact_ids.is_empty() {
+                    "_No artifacts_".to_string()
+                } else {
+                    receipt
+                        .artifact_ids
+                        .iter()
+                        .map(|id| format!("<a href=\"/artifacts/{id}.json\">{id}</a>"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                format!(
+                    r#"<details>
+  <summary>{date}: {text}</summary>
+  <div class="subtitle">Week: <a href="/weeks/{week}.html">{week}</a></div>
+  <div class="subtitle">Artifacts: {artifacts}</div>
+</details>"#,
+                    date = receipt.meeting_date,
+                    text = receipt.motion_text,
+                    week = receipt.week_date,
+                    artifacts = artifacts
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
 
     let commentary = official
         .commentary
         .as_deref()
         .unwrap_or("No commentary generated.");
 
+    let grade_class = grade_class(&official.letter_grade);
     let body = format!(
         r#"
-<header>
-  <nav>
-    <a href="/">Home</a>
-    <a href="/stockade/index.html">Stockade</a>
-  </nav>
-  <a class="sponsor" href="https://github.com/sponsors/Yisonco-Stellargold">Sponsor this project</a>
-</header>
-<div class="container">
+{nav}
+<main class="container">
   <h2>{name}</h2>
-  <p>Overall grade: {grade} ({numeric:.1})</p>
-  <p>Trend: {delta:.1} vs last week</p>
-  <h3>Per-axis grades</h3>
-  <table>
-    <thead><tr><th>Axis</th><th>Grade</th><th>Score</th></tr></thead>
-    <tbody>{axis_rows}</tbody>
-  </table>
+  <div class="score-grid">
+    <div class="score-card">
+      <div class="subtitle">Overall score</div>
+      <div class="stat-value">{numeric:.1}</div>
+      <span class="badge grade-{grade_class}">{grade}</span>
+    </div>
+    <div class="score-card">
+      <div class="subtitle">Trend</div>
+      <div class="stat-value">{delta:.1}</div>
+      <span class="badge">{trend}</span>
+    </div>
+    <div class="score-card">
+      <div class="subtitle">Flags</div>
+      <div class="chip-row">{flags}</div>
+    </div>
+  </div>
 
-  <h3>Receipts</h3>
-  <ul>{receipts}</ul>
+  <section>
+    <h3>Per-axis grades</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Axis</th><th>Grade</th><th>Score</th></tr></thead>
+        <tbody>{axis_rows}</tbody>
+      </table>
+    </div>
+  </section>
 
-  <h3>Commentary</h3>
-  <p>{commentary}</p>
-  <p class="subtitle">Satire/opinion based on this project’s rubric scoring.</p>
-</div>
+  <section>
+    <h3>Receipts</h3>
+    <div class="receipts">{receipts}</div>
+  </section>
+
+  <section class="card">
+    <h3>Commentary</h3>
+    <p>{commentary}</p>
+    <p class="subtitle">Satire/opinion based on this project’s rubric scoring.</p>
+  </section>
+</main>
+{footer}
     "#,
         name = official.name,
         grade = official.letter_grade,
+        grade_class = grade_class,
         numeric = official.numeric_grade,
         axis_rows = axis_rows,
         receipts = receipts,
         commentary = commentary,
-        delta = official.delta
+        delta = official.delta,
+        trend = trend,
+        flags = flags
     );
     html_page(&format!("Official {}", official.name), &body)
 }
 
-fn render_week_page(report: &WeekReport) -> String {
+fn render_week_page(report: &WeekReport, week_date: &str) -> String {
     let issue_tags = if report.issue_tag_counts.is_empty() {
         "_No issue tags._".to_string()
     } else {
@@ -2786,26 +2962,29 @@ fn render_week_page(report: &WeekReport) -> String {
     };
     let body = format!(
         r#"
-<header>
-  <nav>
-    <a href="/">Home</a>
-    <a href="/stockade/index.html">Stockade</a>
-  </nav>
-  <a class="sponsor" href="https://github.com/sponsors/Yisonco-Stellargold">Sponsor this project</a>
-</header>
-<div class="container">
+{nav}
+<main class="container">
   <h2>Week of {date}</h2>
-  <p>Window: {start} to {end}</p>
-  <h3>High-impact artifacts</h3>
-  <ul>{artifacts}</ul>
-  <h3>Decisions This Week</h3>
-  <div class="card-grid">{decisions}</div>
-  <h3>Rubric Alignment</h3>
-  <p>Average score: {avg:.1}</p>
-  <p>Issue tags: {issue_tags}</p>
-  <p><a href="/reports/weekly/{date}.json">Raw report JSON</a></p>
-</div>
+  <p class="subtitle">Window: {start} to {end}</p>
+  <section class="card">
+    <h3>High-impact artifacts</h3>
+    <ul>{artifacts}</ul>
+  </section>
+  <section>
+    <h3>Decisions This Week</h3>
+    <div class="card-grid">{decisions}</div>
+  </section>
+  <section class="card">
+    <h3>Rubric Alignment</h3>
+    <p>Average score: {avg:.1}</p>
+    <p>Issue tags: {issue_tags}</p>
+    <p><a href="/reports/weekly/{date}.json">Raw report JSON</a></p>
+  </section>
+</main>
+{footer}
     "#,
+        nav = nav_html(week_date),
+        footer = footer_html(week_date),
         date = report.date,
         start = report.window_start,
         end = report.window_end,
@@ -2833,6 +3012,94 @@ fn html_page(title: &str, body: &str) -> String {
 </html>
 "#
     )
+}
+
+fn nav_html(week_date: &str) -> String {
+    format!(
+        r#"
+<header class="site-header">
+  <div class="nav-inner">
+    <div class="nav-brand">
+      {icon_logo}
+      <span>LaRue Civic Intel</span>
+    </div>
+    <nav class="nav-links">
+      <a href="/">Home</a>
+      <a href="/stockade/index.html">Stockade</a>
+      <a href="/officials/index.html">Officials</a>
+      <a href="/weeks/{week_date}.html">Latest Week</a>
+    </nav>
+    <div class="nav-search" aria-disabled="true">
+      {icon_search}
+      <input type="text" placeholder="Search (coming soon)" disabled />
+    </div>
+  </div>
+</header>
+"#,
+        week_date = week_date,
+        icon_logo = icon_court(),
+        icon_search = icon_search()
+    )
+}
+
+fn footer_html(week_date: &str) -> String {
+    format!(
+        r#"
+<footer class="footer">
+  <div class="footer-inner">
+    <div class="footer-links">
+      <a class="btn" href="https://github.com/sponsors/Yisonco-Stellargold">Sponsor</a>
+      <a href="https://github.com/Yisonco-Stellargold/larue-civic-intel">Repository</a>
+      <a href="/reports/weekly/{week_date}.json">Latest report JSON</a>
+    </div>
+    <div class="subtitle">Rubric-based scoring; commentary is opinion/satire. Always consult primary sources.</div>
+  </div>
+</footer>
+"#,
+        week_date = week_date
+    )
+}
+
+fn icon_court() -> &'static str {
+    r#"<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21h18M5 21V9l7-4 7 4v12M9 21v-6h6v6M2 9l10-5 10 5"/></svg>"#
+}
+
+fn icon_cap() -> &'static str {
+    r#"<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 9l10-5 10 5-10 5-10-5Z"/><path d="M6 12v4c0 1.5 3 3 6 3s6-1.5 6-3v-4"/></svg>"#
+}
+
+fn icon_ballot() -> &'static str {
+    r#"<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h12v6H4z"/><path d="M8 14h12v6H8z"/><path d="M16 4l6 6M16 10l6-6"/></svg>"#
+}
+
+fn icon_search() -> &'static str {
+    r#"<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3-3"/></svg>"#
+}
+
+fn icon_trend_up() -> &'static str {
+    r#"<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16l6-6 4 4 6-6"/><path d="M14 8h6v6"/></svg>"#
+}
+
+fn icon_trend_down() -> &'static str {
+    r#"<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8l6 6 4-4 6 6"/><path d="M14 16h6v-6"/></svg>"#
+}
+
+fn icon_alert() -> &'static str {
+    r#"<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l9 16H3l9-16Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>"#
+}
+
+fn icon_info() -> &'static str {
+    r#"<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 10v6"/><path d="M12 7h.01"/></svg>"#
+}
+
+fn grade_class(grade: &str) -> &'static str {
+    match grade.chars().next().unwrap_or('F') {
+        'A' => "a",
+        'B' => "b",
+        'C' => "c",
+        'D' => "d",
+        _ => "f",
+    }
 }
 
 fn build_commentary_line(

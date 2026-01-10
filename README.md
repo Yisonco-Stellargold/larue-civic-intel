@@ -115,6 +115,19 @@ Disclaimers:
 - Commentary is opinion/satire tied to score changes and public records.
 - Always link back to primary sources for auditability.
 
+## Backfill + IPFS
+
+This repo includes a manual GitHub Actions workflow that runs the Wayback backfill in chunks and pins
+the resulting site to IPFS (Pinata). To enable it, add repository secrets:
+
+- `PINATA_API_KEY`
+- `PINATA_API_SECRET`
+
+Run the workflow from the Actions tab using **Wayback Backfill + IPFS**, and adjust `limit` /
+`rate_limit_seconds` to control chunk size and pacing. The workflow prints the CID and writes
+`out/site/ipfs.json` with the CID metadata, and you can access the pinned site via:
+`https://ipfs.io/ipfs/<CID>/`.
+
 ## Roadmap
 
 Planned interfaces (placeholders only; no live integrations yet):
