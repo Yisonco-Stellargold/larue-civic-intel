@@ -118,7 +118,8 @@ Disclaimers:
 ## Backfill + IPFS
 
 This repo includes a manual GitHub Actions workflow that runs the Wayback backfill in chunks and pins
-the resulting site to IPFS (Pinata). To enable it, add repository secrets:
+the resulting site to IPFS (Pinata) using `ipshipyard/ipfs-deploy-action`. To enable it, add
+repository secrets:
 
 - `PINATA_API_KEY`
 - `PINATA_API_SECRET`

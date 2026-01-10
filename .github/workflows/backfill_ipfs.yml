@@ -74,20 +74,19 @@ jobs:
           touch out/site/.nojekyll
 
       - name: Pin site to IPFS (Pinata)
-        id: pinata
-        uses: pinata-cloud/action-pinata@v1
+        id: ipfs
+        uses: ipshipyard/ipfs-deploy-action@v1
         with:
-          pinata_api_key: ${{ secrets.PINATA_API_KEY }}
-          pinata_secret_api_key: ${{ secrets.PINATA_API_SECRET }}
-          source: out/site
-          pinata_pin_name: "larue-civic-intel-backfill"
+          path: out/site
+          pinata-api-key: ${{ secrets.PINATA_API_KEY }}
+          pinata-secret-api-key: ${{ secrets.PINATA_API_SECRET }}
 
       - name: Write IPFS metadata
         run: |
-          CID="${{ steps.pinata.outputs.IpfsHash || steps.pinata.outputs.ipfsHash || steps.pinata.outputs.cid }}"
+          CID="${{ steps.ipfs.outputs.cid }}"
           DATE="$(date -u +%F)"
           echo "Pinned CID: ${CID}"
-          printf '{\n  "cid": "%s",\n  "date": "%s",\n  "source": "backfill_ipfs_workflow"\n}\n' "${CID}" "${DATE}" > out/site/ipfs.json
+          printf '{\n  "cid": "%s",\n  "date": "%s",\n  "source": "github_actions_backfill_ipfs"\n}\n' "${CID}" "${DATE}" > out/site/ipfs.json
 
       - name: Upload state artifact
         uses: actions/upload-artifact@v4
