@@ -1,0 +1,54 @@
+name: Weekly Pipeline
+
+on:
+  schedule:
+    - cron: "0 2 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  weekly:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run weekly pipeline
+        run: |
+          cargo run -p cli -- run-weekly --config config/ci.toml
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Ensure .nojekyll
+        run: |
+          mkdir -p out/site
+          touch out/site/.nojekyll
+
+      - name: Upload weekly reports artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-reports
+          path: out/reports/weekly
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: out/site
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
