@@ -1,0 +1,104 @@
+name: Wayback Backfill + IPFS
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max snapshots to fetch this run"
+        required: false
+        default: "25"
+      rate_limit_seconds:
+        description: "Delay between Wayback requests"
+        required: false
+        default: "1"
+      run_pipeline:
+        description: "Run full pipeline after backfill"
+        required: false
+        default: "true"
+
+permissions:
+  contents: read
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps
+        run: |
+          if [ -f workers/requirements.txt ]; then
+            pip install -r workers/requirements.txt
+          else
+            pip install pyyaml
+          fi
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Restore prior state
+        uses: actions/download-artifact@v4
+        with:
+          name: larue-state
+          path: .
+          if-no-files-found: warn
+
+      - name: Ensure state directories
+        run: |
+          mkdir -p out/state out/artifacts
+
+      - name: Run Wayback backfill
+        run: |
+          python workers/collectors/wayback_backfill.py \
+            --config config/ci.toml \
+            --limit "${{ inputs.limit }}" \
+            --rate-limit-seconds "${{ inputs.rate_limit_seconds }}"
+
+      - name: Run weekly pipeline
+        if: ${{ inputs.run_pipeline == 'true' }}
+        run: |
+          cargo run -p cli -- run-weekly --config config/ci.toml
+
+      - name: Ensure .nojekyll
+        run: |
+          mkdir -p out/site
+          touch out/site/.nojekyll
+
+      - name: Pin site to IPFS (Pinata)
+        id: ipfs
+        uses: ipshipyard/ipfs-deploy-action@v1
+        with:
+          path: out/site
+          pinata-api-key: ${{ secrets.PINATA_API_KEY }}
+          pinata-secret-api-key: ${{ secrets.PINATA_API_SECRET }}
+
+      - name: Write IPFS metadata
+        run: |
+          CID="${{ steps.ipfs.outputs.cid }}"
+          DATE="$(date -u +%F)"
+          echo "Pinned CID: ${CID}"
+          printf '{\n  "cid": "%s",\n  "date": "%s",\n  "source": "github_actions_backfill_ipfs"\n}\n' "${CID}" "${DATE}" > out/site/ipfs.json
+
+      - name: Upload state artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: larue-state
+          path: |
+            out/state
+            out/artifacts
+          retention-days: 30
+
+      - name: Upload IPFS metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipfs-metadata
+          path: out/site/ipfs.json

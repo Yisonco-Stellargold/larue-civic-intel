@@ -1,5 +1,6 @@
 pub mod schema;
 pub mod db;
+pub mod scoring;
 
 
 pub fn add(left: u64, right: u64) -> u64 {
