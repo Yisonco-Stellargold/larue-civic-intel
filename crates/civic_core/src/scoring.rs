@@ -145,6 +145,7 @@ struct BiasControlsFile {
 #[derive(Debug, Clone, Deserialize)]
 struct BiasControlEntry {
     penalty: Option<f64>,
+    #[allow(dead_code)]
     modifier: Option<f64>,
     threshold: Option<f64>,
     window: Option<usize>,
@@ -377,7 +378,7 @@ pub fn compute_vote_score_with_motion(
     rubric: &Rubric,
 ) -> ScoreResult {
     let mut axis_scores = motion_score.axis_scores.clone();
-    let mut evidence = vec![format!("vote_choice:{vote_choice}")];
+    let evidence = vec![format!("vote_choice:{vote_choice}")];
     let mut flags = Vec::new();
 
     match vote_choice {

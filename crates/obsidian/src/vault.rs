@@ -299,10 +299,13 @@ struct DecisionMeetingRow {
 
 #[derive(Debug)]
 struct DecisionMotionRow {
+    #[allow(dead_code)]
     id: String,
+    #[allow(dead_code)]
     meeting_id: String,
     text: String,
     result: Option<String>,
+    #[allow(dead_code)]
     index: i64,
 }
 

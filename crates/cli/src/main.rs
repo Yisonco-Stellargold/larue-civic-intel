@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::Command;
 use time::format_description::well_known::Rfc3339;
 use time::format_description::FormatItem;
-use time::{Date, Duration, OffsetDateTime, Time};
+use time::{Duration, Month, OffsetDateTime};
 
 #[derive(Parser)]
 #[command(name = "larue")]
@@ -1012,7 +1012,7 @@ fn score_weekly(config_path: PathBuf, date: Option<String>) -> Result<()> {
                 per_vote_scores.push((score_id, name, score));
             }
 
-            for (score_id, name, score) in per_vote_scores {
+            for (score_id, _name, score) in per_vote_scores {
                 scores_to_write.push(DecisionScore {
                     id: score_id,
                     meeting_id: Some(meeting.id.clone()),
@@ -1544,8 +1544,7 @@ fn resolve_window(date: Option<String>) -> Result<(String, String, String)> {
     let date_format: &[FormatItem<'_>] = time::macros::format_description!("[year]-[month]-[day]");
     let now = OffsetDateTime::now_utc();
     if let Some(date_value) = date {
-        let parsed = time::Date::parse(&date_value, date_format)
-            .map_err(|err| anyhow!("Invalid date {date_value}: {err}"))?;
+        let parsed = parse_date_ymd(&date_value)?;
         let end = parsed.next_day().unwrap_or(parsed);
         let end_dt = end.with_time(time::Time::MIDNIGHT).assume_utc();
         let start_dt = end_dt - Duration::days(7);
@@ -1558,6 +1557,31 @@ fn resolve_window(date: Option<String>) -> Result<(String, String, String)> {
     let window_end = now.format(&Rfc3339)?;
     let window_start = (now - Duration::days(7)).format(&Rfc3339)?;
     Ok((date_str, window_start, window_end))
+}
+
+fn parse_date_ymd(date_value: &str) -> Result<time::Date> {
+    let mut parts = date_value.split('-');
+    let year_str = parts.next().unwrap_or("");
+    let month_str = parts.next().unwrap_or("");
+    let day_str = parts.next().unwrap_or("");
+    if parts.next().is_some() || year_str.is_empty() || month_str.is_empty() || day_str.is_empty() {
+        return Err(anyhow!(
+            "Invalid date {date_value}: expected format YYYY-MM-DD"
+        ));
+    }
+    let year: i32 = year_str
+        .parse()
+        .map_err(|err| anyhow!("Invalid date {date_value}: invalid year ({err})"))?;
+    let month: u8 = month_str
+        .parse()
+        .map_err(|err| anyhow!("Invalid date {date_value}: invalid month ({err})"))?;
+    let day: u8 = day_str
+        .parse()
+        .map_err(|err| anyhow!("Invalid date {date_value}: invalid day ({err})"))?;
+    let month = Month::try_from(month)
+        .map_err(|err| anyhow!("Invalid date {date_value}: invalid month ({err})"))?;
+    time::Date::from_calendar_date(year, month, day)
+        .map_err(|err| anyhow!("Invalid date {date_value}: {err}"))
 }
 
 fn load_meetings_in_window(
@@ -2370,7 +2394,7 @@ fn copy_report_jsons(out_dir: &Path, dest_dir: &Path) -> Result<()> {
             continue;
         }
         let filename = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
-        fs::copy(path, dest_dir.join(filename))?;
+        fs::copy(&path, dest_dir.join(filename))?;
     }
     Ok(())
 }
