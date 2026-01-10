@@ -104,7 +104,11 @@ TODO: Replace the template-based commentary generator with a future LLM provider
 ## Free Weekly Automation (GitHub Actions + Pages)
 
 This repository includes a weekly GitHub Actions workflow that runs the pipeline and publishes the
-static site to GitHub Pages. Update `config.toml` or the workflow if you need different sources.
+static site to GitHub Pages at `https://<org-or-user>.github.io/<repo>/`. Update the schedule in
+`.github/workflows/weekly.yml` by editing the `cron` expression (UTC).
+
+Local runs use `config.toml` (copied from `config.example.toml`). The workflow uses
+`config/ci.toml`, which keeps output under `out/` and enables only safe collectors for CI.
 
 Disclaimers:
 - Scoring is rubric-based and conservative; insufficient evidence yields neutral scores.

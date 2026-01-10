@@ -25,13 +25,25 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Prepare config
-        run: cp config.example.toml config.toml
-
       - name: Run weekly pipeline
         run: |
-          cargo run -p cli -- run-weekly --config ./config.toml
-          cargo run -p cli -- export-site --config ./config.toml
+          cargo run -p cli -- run-weekly --config config/ci.toml
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Ensure .nojekyll
+        run: |
+          mkdir -p out/site
+          touch out/site/.nojekyll
+
+      - name: Upload weekly reports artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-reports
+          path: out/reports/weekly
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

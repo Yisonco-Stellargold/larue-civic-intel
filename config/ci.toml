@@ -1,0 +1,53 @@
+[project]
+jurisdiction = "LaRue County, KY"
+county = "Larue"
+state = "KY"
+
+[storage]
+db_path = "out/civic.db"
+vault_path = "out/vault"
+out_dir = "out"
+
+[sources.ky_public_notice]
+enabled = true
+query = "Larue"
+tags = ["public_notice","larue","ky"]
+
+[sources.larue_fiscal_court]
+enabled = false
+base_url = "https://www.laruecounty.org/fiscal-court"
+
+[sources.wayback]
+enabled = false
+urls = ["https://www.laruecounty.ky.gov/", "http://www.laruecountyherald.com/"]
+include_subpaths = false
+rate_limit_seconds = 1.0
+limit_per_run = 1
+high_impact_url_keywords = ["zoning","ordinance","minutes","agenda","budget","tax","contract","bid","election","rezon","variance"]
+
+[sources.school_board]
+enabled = false
+base_url = ""
+
+[ai]
+enabled = false
+provider = "none"
+
+[publish]
+enabled = false
+provider = "none"
+
+[site]
+enable_commentary = true
+commentary_style = "satire"
+
+[tagging]
+enabled = true
+min_hits_default = 1
+min_hits_broad = 2
+broad_tags = ["tax","budget","policy"]
+
+[tagging.tag_min_hits]
+tax = 2
+budget = 2
+contract = 1
