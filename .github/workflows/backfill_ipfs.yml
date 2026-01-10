@@ -58,7 +58,7 @@ jobs:
           if [ -d ".tmp/larue-state/out/state" ]; then
             cp -R .tmp/larue-state/out/state/* out/state/ || true
           else
-            echo "No prior larue-state artifact found; continuing with empty state."
+            echo "No prior larue-state artifact found (first run). Continuing."
           fi
           if [ -d ".tmp/larue-state/out/artifacts" ]; then
             cp -R .tmp/larue-state/out/artifacts/* out/artifacts/ || true
