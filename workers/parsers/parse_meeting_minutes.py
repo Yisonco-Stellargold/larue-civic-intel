@@ -1,162 +1,343 @@
 import argparse
-import hashlib
 import json
-from datetime import datetime, timezone
-from html.parser import HTMLParser
-from pathlib import Path
 import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+import tomllib
 
-from pypdf import PdfReader
-
-MONTHS = {
-    "january": 1,
-    "february": 2,
-    "march": 3,
-    "april": 4,
-    "may": 5,
-    "june": 6,
-    "july": 7,
-    "august": 8,
-    "september": 9,
-    "october": 10,
-    "november": 11,
-    "december": 12,
+DEFAULT_OUT_DIR = "out"
+TARGET_ISSUE_TAGS = {
+    "ordinance",
+    "budget",
+    "contract",
+    "bid",
+    "rezoning",
+    "variance",
+    "tax",
+    "bond",
 }
 
+MOTION_PATTERNS = [
+    re.compile(r"motion by (?P<mover>[^,]+),?\s+second by (?P<seconder>[^.]+)", re.I),
+    re.compile(
+        r"moved by (?P<mover>[^,]+) and seconded by (?P<seconder>[^.]+)",
+        re.I,
+    ),
+    re.compile(r"upon motion(?: of)? (?P<mover>[^,]+)?", re.I),
+]
 
-class TextExtractor(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self.parts: list[str] = []
+VOICE_VOTE_PATTERNS = {
+    "passed": ["motion carried", "motion passed", "approved"],
+    "failed": ["motion failed", "failed motion", "motion fails"],
+}
 
-    def handle_data(self, data: str) -> None:
-        text = data.strip()
-        if text:
-            self.parts.append(text)
+ROLL_CALL_LABELS = {"aye": "ayes", "nay": "nays", "abstain": "abstain"}
 
-    def get_text(self) -> str:
-        return "\n".join(self.parts)
+
+def read_config(path: Path) -> dict:
+    with path.open("rb") as handle:
+        return tomllib.load(handle)
+
+
+def get_nested(config: dict, *keys, default=None):
+    current = config
+    for key in keys:
+        if not isinstance(current, dict) or key not in current:
+            return default
+        current = current[key]
+    return current
 
 
 def read_artifact(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def extract_text(snapshot_path: Path) -> str:
-    if snapshot_path.suffix.lower() == ".pdf":
-        reader = PdfReader(str(snapshot_path))
-        pages = []
-        for page in reader.pages:
-            pages.append(page.extract_text() or "")
-        return "\n".join(pages)
-
-    if snapshot_path.suffix.lower() in {".html", ".htm"}:
-        parser = TextExtractor()
-        parser.feed(snapshot_path.read_text(encoding="utf-8", errors="replace"))
-        return parser.get_text()
-
-    return snapshot_path.read_text(encoding="utf-8", errors="replace")
+def ensure_tags(artifact: dict) -> list[str]:
+    tags = artifact.get("tags")
+    if isinstance(tags, list):
+        return tags
+    artifact["tags"] = []
+    return artifact["tags"]
 
 
-def parse_date_from_text(text: str) -> datetime | None:
-    for match in re.finditer(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", text):
+def add_tag(artifact: dict, tag: str) -> None:
+    tags = ensure_tags(artifact)
+    if tag not in tags:
+        tags.append(tag)
+
+
+def stable_meeting_id(body_id: str, date_str: str) -> str:
+    return f"{body_id}:{date_str.replace('-', '')}"
+
+
+def stable_motion_id(meeting_id: str, index: int) -> str:
+    return f"{meeting_id}:motion:{index:02d}"
+
+
+def stable_vote_id(motion_id: str) -> str:
+    return f"{motion_id}:vote"
+
+
+def parse_date(text: str) -> str | None:
+    match = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", text)
+    if match:
         year, month, day = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
-        try:
-            return datetime(year, month, day, tzinfo=timezone.utc)
-        except ValueError:
-            continue
+        return format_date(year, month, day)
 
-    month_names = "|".join(MONTHS.keys())
-    for match in re.finditer(
-        rf"({month_names})\s+(\d{{1,2}}),\s+(\d{{4}})",
-        text,
-        flags=re.IGNORECASE,
-    ):
-        month_name = match.group(1).lower()
-        month = MONTHS.get(month_name)
+    match = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})", text)
+    if match:
+        month, day, year = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        return format_date(year, month, day)
+
+    month_names = (
+        "January|February|March|April|May|June|July|August|September|October|November|December"
+    )
+    match = re.search(rf"({month_names})\s+(\d{{1,2}}),\s*(\d{{4}})", text)
+    if match:
+        month = datetime.strptime(match.group(1), "%B").month
         day = int(match.group(2))
         year = int(match.group(3))
-        if month is None:
-            continue
-        try:
-            return datetime(year, month, day, tzinfo=timezone.utc)
-        except ValueError:
-            continue
+        return format_date(year, month, day)
 
     return None
 
 
-def parse_date_from_filename(snapshot_path: Path) -> datetime | None:
-    return parse_date_from_text(snapshot_path.stem)
+def format_date(year: int, month: int, day: int) -> str | None:
+    try:
+        value = datetime(year, month, day, tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return value.date().isoformat()
 
 
-def infer_started_at(text: str, snapshot_path: Path, retrieved_at: str) -> str:
-    parsed = parse_date_from_text(text) or parse_date_from_filename(snapshot_path)
-    if parsed is None:
-        try:
-            retrieved = datetime.fromisoformat(retrieved_at.replace("Z", "+00:00"))
-            parsed = datetime(
-                retrieved.year,
-                retrieved.month,
-                retrieved.day,
-                tzinfo=timezone.utc,
-            )
-        except ValueError:
-            parsed = datetime.now(timezone.utc)
-    return parsed.replace(hour=0, minute=0, second=0, microsecond=0).isoformat().replace(
-        "+00:00", "Z"
-    )
+def meeting_type(text: str) -> str | None:
+    lowered = text.lower()
+    if "special meeting" in lowered:
+        return "special"
+    if "work session" in lowered:
+        return "work_session"
+    if "regular meeting" in lowered:
+        return "regular"
+    return None
 
 
-def detect_motions(text: str) -> list[dict]:
+def normalize_lines(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def detect_motions(lines: list[str]) -> list[dict]:
     motions = []
-    for line in text.splitlines():
-        lower = line.lower()
-        if "roll call" in lower or "roll-call" in lower:
-            motions.append({"text": line.strip(), "result": None})
+    for idx, line in enumerate(lines):
+        motion_match = None
+        for pattern in MOTION_PATTERNS:
+            motion_match = pattern.search(line)
+            if motion_match:
+                break
+        if not motion_match:
+            continue
+
+        remainder = line[motion_match.end() :].strip(" .:-")
+        motion_text = remainder
+        if not motion_text and idx + 1 < len(lines):
+            next_line = lines[idx + 1].strip()
+            if next_line and not any(pattern.search(next_line) for pattern in MOTION_PATTERNS):
+                motion_text = next_line
+
+        motions.append(
+            {
+                "line_index": idx,
+                "text": motion_text,
+                "moved_by": motion_match.groupdict().get("mover"),
+                "seconded_by": motion_match.groupdict().get("seconder"),
+            }
+        )
     return motions
 
 
-def meeting_id_from_url(url: str) -> str:
-    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
-    return f"larue_fiscal_court_meeting:{digest}"
-
-
-def write_meeting(out_dir: Path, meeting: dict) -> None:
-    meetings_dir = out_dir / "meetings"
-    meetings_dir.mkdir(parents=True, exist_ok=True)
-    meeting_path = meetings_dir / f"{meeting['id']}.json"
-    meeting_path.write_text(
-        json.dumps(meeting, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Parse a meeting snapshot into Meeting JSON.")
-    parser.add_argument("--artifact", type=Path, required=True)
-    parser.add_argument("--snapshot", type=Path, required=True)
-    parser.add_argument("--out-dir", type=Path, required=True)
-    args = parser.parse_args()
-
-    artifact = read_artifact(args.artifact)
-    snapshot_path = args.snapshot
-    text = extract_text(snapshot_path)
-
-    source = artifact.get("source", {})
-    source_url = source.get("value", "")
-    retrieved_at = source.get("retrieved_at", "")
-
-    meeting = {
-        "id": meeting_id_from_url(source_url),
-        "body_id": "larue-fiscal-court",
-        "started_at": infer_started_at(text, snapshot_path, retrieved_at),
-        "artifact_ids": [artifact.get("id", "")],
-        "motions": detect_motions(text),
+def detect_vote(block_text: str) -> dict | None:
+    lowered = block_text.lower()
+    vote = {
+        "vote_type": None,
+        "outcome": None,
+        "ayes": [],
+        "nays": [],
+        "abstain": [],
     }
 
-    write_meeting(args.out_dir, meeting)
+    roll_call_lines = []
+    for line in block_text.splitlines():
+        if any(label in line.lower() for label in ["aye", "nay", "abstain"]):
+            roll_call_lines.append(line)
+    if roll_call_lines:
+        vote["vote_type"] = "roll_call"
+        for line in roll_call_lines:
+            for label, key in ROLL_CALL_LABELS.items():
+                if label in line.lower():
+                    parts = line.split(":", 1)
+                    if len(parts) == 2:
+                        names = [name.strip() for name in parts[1].split(",") if name.strip()]
+                        vote[key] = names
+        if vote["ayes"] or vote["nays"] or vote["abstain"]:
+            if len(vote["ayes"]) > len(vote["nays"]):
+                vote["outcome"] = "passed"
+            elif len(vote["nays"]) > len(vote["ayes"]):
+                vote["outcome"] = "failed"
+        return vote
+
+    for outcome, phrases in VOICE_VOTE_PATTERNS.items():
+        if any(phrase in lowered for phrase in phrases):
+            vote["vote_type"] = "voice"
+            vote["outcome"] = outcome
+            return vote
+
+    return None
+
+
+def parse_meeting(artifact_id: str, body_text: str) -> tuple[dict, list[dict], list[dict]] | None:
+    date_str = parse_date(body_text)
+    if not date_str:
+        return None
+
+    meeting_id = stable_meeting_id("larue-fiscal-court", date_str)
+    meeting = {
+        "id": meeting_id,
+        "body_id": "larue-fiscal-court",
+        "body_name": "LaRue County Fiscal Court",
+        "started_at": f"{date_str}T00:00:00Z",
+        "meeting_type": meeting_type(body_text),
+        "artifact_ids": [artifact_id],
+    }
+
+    lines = normalize_lines(body_text)
+    motions_raw = detect_motions(lines)
+    motions = []
+    votes = []
+
+    for index, motion in enumerate(motions_raw):
+        motion_id = stable_motion_id(meeting_id, index + 1)
+        motion_text = motion.get("text") or ""
+        motion_record = {
+            "id": motion_id,
+            "meeting_id": meeting_id,
+            "index": index + 1,
+            "text": motion_text,
+            "moved_by": clean_person(motion.get("moved_by")),
+            "seconded_by": clean_person(motion.get("seconded_by")),
+            "result": None,
+        }
+
+        next_index = motions_raw[index + 1]["line_index"] if index + 1 < len(motions_raw) else None
+        block_lines = lines[motion["line_index"] : next_index] if next_index else lines[motion["line_index"] :]
+        block_text = "\n".join(block_lines)
+        vote = detect_vote(block_text)
+        if vote:
+            if vote.get("outcome"):
+                motion_record["result"] = vote["outcome"]
+            vote_record = {
+                "id": stable_vote_id(motion_id),
+                "motion_id": motion_id,
+                "vote_type": vote.get("vote_type"),
+                "outcome": vote.get("outcome"),
+                "ayes": vote.get("ayes", []),
+                "nays": vote.get("nays", []),
+                "abstain": vote.get("abstain", []),
+            }
+            votes.append(vote_record)
+
+        motions.append(motion_record)
+
+    return meeting, motions, votes
+
+
+def clean_person(value: str | None) -> str | None:
+    if not value:
+        return None
+    return value.strip().strip(".-")
+
+
+def write_decision(out_dir: Path, artifact_id: str, meeting: dict, motions: list[dict], votes: list[dict]) -> None:
+    decisions_dir = out_dir / "decisions"
+    decisions_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "meeting": meeting,
+        "motions": motions,
+        "votes": votes,
+    }
+    path = decisions_dir / f"meeting_{artifact_id}.json"
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Parse meeting minutes into decisions JSON.")
+    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--artifacts", type=Path, required=True)
+    parser.add_argument("--force", action="store_true", help="Re-parse already parsed artifacts.")
+    args = parser.parse_args()
+
+    config = read_config(args.config)
+    out_dir_value = get_nested(config, "storage", "out_dir", default=DEFAULT_OUT_DIR)
+    out_dir = Path(out_dir_value)
+
+    artifacts_dir = args.artifacts
+    if not artifacts_dir.exists():
+        print(f"Artifacts directory not found: {artifacts_dir}")
+        return 0
+
+    artifact_paths = sorted(artifacts_dir.glob("*.json"), key=lambda path: path.name)
+    if not artifact_paths:
+        print(f"No artifact JSON files found in {artifacts_dir}.")
+        return 0
+
+    artifacts_checked = 0
+    meetings_parsed = 0
+    motions_found = 0
+    votes_found = 0
+
+    for artifact_path in artifact_paths:
+        try:
+            artifact = read_artifact(artifact_path)
+        except json.JSONDecodeError as exc:
+            print(f"Skipping invalid JSON {artifact_path.name}: {exc}")
+            continue
+        tags = ensure_tags(artifact)
+        if "issue_tagged" not in tags:
+            continue
+        issue_tags = artifact.get("issue_tags", [])
+        if not isinstance(issue_tags, list):
+            continue
+        if not any(tag in TARGET_ISSUE_TAGS for tag in issue_tags):
+            continue
+        if "meeting_parsed" in tags and not args.force:
+            continue
+        body_text = artifact.get("body_text")
+        if not isinstance(body_text, str) or not body_text.strip():
+            continue
+
+        artifacts_checked += 1
+        parsed = parse_meeting(artifact.get("id", ""), body_text)
+        if not parsed:
+            continue
+        meeting, motions, votes = parsed
+
+        write_decision(out_dir, artifact.get("id", ""), meeting, motions, votes)
+        add_tag(artifact, "meeting_parsed")
+        artifact["parsed_meeting_id"] = meeting["id"]
+        artifact_path.write_text(
+            json.dumps(artifact, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        meetings_parsed += 1
+        motions_found += len(motions)
+        votes_found += len(votes)
+
+    print(
+        f"artifacts_checked={artifacts_checked} meetings_parsed={meetings_parsed} "
+        f"motions_found={motions_found} votes_found={votes_found}"
+    )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

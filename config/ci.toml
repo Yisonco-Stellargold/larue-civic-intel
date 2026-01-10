@@ -4,15 +4,14 @@ county = "Larue"
 state = "KY"
 
 [storage]
-db_path = "civic.db"
-vault_path = "vault"
+db_path = "out/civic.db"
+vault_path = "out/vault"
 out_dir = "out"
 
 [sources.ky_public_notice]
 enabled = true
 query = "Larue"
 tags = ["public_notice","larue","ky"]
-# optional: base_url override if needed later
 
 [sources.larue_fiscal_court]
 enabled = false
@@ -23,7 +22,7 @@ enabled = false
 urls = ["https://www.laruecounty.ky.gov/", "http://www.laruecountyherald.com/"]
 include_subpaths = false
 rate_limit_seconds = 1.0
-limit_per_run = 200
+limit_per_run = 1
 high_impact_url_keywords = ["zoning","ordinance","minutes","agenda","budget","tax","contract","bid","election","rezon","variance"]
 
 [sources.school_board]
