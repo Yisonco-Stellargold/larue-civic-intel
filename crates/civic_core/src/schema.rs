@@ -40,3 +40,42 @@ pub struct Meeting {
     pub artifact_ids: Vec<String>,
     pub motions: Vec<Motion>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DecisionMeeting {
+    pub id: String,
+    pub body_id: String,
+    pub body_name: Option<String>,
+    pub started_at: String,
+    pub meeting_type: Option<String>,
+    pub artifact_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DecisionMotion {
+    pub id: String,
+    pub meeting_id: String,
+    pub index: usize,
+    pub text: String,
+    pub moved_by: Option<String>,
+    pub seconded_by: Option<String>,
+    pub result: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DecisionVote {
+    pub id: String,
+    pub motion_id: String,
+    pub vote_type: Option<String>,
+    pub outcome: Option<String>,
+    pub ayes: Vec<String>,
+    pub nays: Vec<String>,
+    pub abstain: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DecisionBundle {
+    pub meeting: DecisionMeeting,
+    pub motions: Vec<DecisionMotion>,
+    pub votes: Vec<DecisionVote>,
+}
