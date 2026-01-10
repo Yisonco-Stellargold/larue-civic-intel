@@ -125,8 +125,9 @@ repository secrets:
 - `PINATA_API_SECRET`
 
 Run the workflow from the Actions tab using **Wayback Backfill + IPFS**, and adjust `limit` /
-`rate_limit_seconds` to control chunk size and pacing. The workflow prints the CID and writes
-`out/site/ipfs.json` with the CID metadata, and you can access the pinned site via:
+`rate_limit_seconds` to control chunk size and pacing. The first run will not restore prior state,
+which is expected. The workflow prints the CID and writes `out/site/ipfs.json` with the CID metadata,
+and you can access the pinned site via:
 `https://ipfs.io/ipfs/<CID>/`.
 
 ## Roadmap

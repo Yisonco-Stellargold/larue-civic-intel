@@ -45,16 +45,24 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Restore prior state
+      - name: Restore prior state artifact
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: larue-state
-          path: .
-          if-no-files-found: warn
+          path: .tmp/larue-state
 
-      - name: Ensure state directories
+      - name: Restore state directories
         run: |
           mkdir -p out/state out/artifacts
+          if [ -d ".tmp/larue-state/out/state" ]; then
+            cp -R .tmp/larue-state/out/state/* out/state/ || true
+          else
+            echo "No prior larue-state artifact found; continuing with empty state."
+          fi
+          if [ -d ".tmp/larue-state/out/artifacts" ]; then
+            cp -R .tmp/larue-state/out/artifacts/* out/artifacts/ || true
+          fi
 
       - name: Run Wayback backfill
         run: |
