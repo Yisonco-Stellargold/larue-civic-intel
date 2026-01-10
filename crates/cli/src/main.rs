@@ -1659,14 +1659,19 @@ fn load_linked_artifacts(
 }
 
 fn load_motions_for_meeting(conn: &rusqlite::Connection, meeting_id: &str) -> Result<Vec<MotionRow>> {
-    let mut stmt = conn.prepare(
+    let order_by = if motions_has_index(conn)? {
+        "ORDER BY motion_index ASC, id ASC"
+    } else {
+        "ORDER BY id ASC"
+    };
+    let mut stmt = conn.prepare(&format!(
         r#"
         SELECT id, text
         FROM motions
         WHERE meeting_id = ?1
-        ORDER BY motion_index ASC, id ASC
-        "#,
-    )?;
+        {order_by}
+        "#
+    ))?;
     let rows = stmt.query_map([meeting_id], |row| {
         Ok(MotionRow {
             id: row.get(0)?,
@@ -1678,6 +1683,17 @@ fn load_motions_for_meeting(conn: &rusqlite::Connection, meeting_id: &str) -> Re
         motions.push(row?);
     }
     Ok(motions)
+}
+
+fn motions_has_index(conn: &rusqlite::Connection) -> Result<bool> {
+    let mut stmt = conn.prepare("PRAGMA table_info(motions)")?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for column in columns {
+        if column? == "motion_index" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn load_votes_for_meeting(conn: &rusqlite::Connection, meeting_id: &str) -> Result<Vec<VoteRow>> {

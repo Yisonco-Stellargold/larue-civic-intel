@@ -82,7 +82,7 @@ pub fn build_vault(conn: &Connection, vault_root: &Path) -> Result<()> {
     // 3) Write meeting notes
     let mut stmt = conn.prepare(
         r#"
-        SELECT id, body_id, started_at, artifact_ids_json, motions_json
+        SELECT id, body_id, started_at, artifact_ids_json, COALESCE(motions_json, '')
         FROM meetings
         ORDER BY started_at DESC
         "#,

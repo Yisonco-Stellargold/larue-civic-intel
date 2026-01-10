@@ -108,24 +108,45 @@ fn init(conn: &Connection) -> Result<()> {
         "#,
     )?;
     ensure_motions_text_column(conn)?;
+    ensure_motions_motion_index_column(conn)?;
+    ensure_meetings_motions_json_column(conn)?;
     seed_bodies(conn)?;
     Ok(())
 }
 
 fn ensure_motions_text_column(conn: &Connection) -> Result<()> {
-    let mut stmt = conn.prepare("PRAGMA table_info(motions)")?;
-    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
-    let mut has_text = false;
-    for column in columns {
-        if column? == "text" {
-            has_text = true;
-            break;
-        }
-    }
-    if !has_text {
+    if !column_exists(conn, "motions", "text")? {
         conn.execute("ALTER TABLE motions ADD COLUMN text TEXT", params![])?;
     }
     Ok(())
+}
+
+fn ensure_motions_motion_index_column(conn: &Connection) -> Result<()> {
+    if !column_exists(conn, "motions", "motion_index")? {
+        conn.execute(
+            "ALTER TABLE motions ADD COLUMN motion_index INTEGER",
+            params![],
+        )?;
+    }
+    Ok(())
+}
+
+fn ensure_meetings_motions_json_column(conn: &Connection) -> Result<()> {
+    if !column_exists(conn, "meetings", "motions_json")? {
+        conn.execute("ALTER TABLE meetings ADD COLUMN motions_json TEXT", params![])?;
+    }
+    Ok(())
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for name in columns {
+        if name? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn seed_bodies(conn: &Connection) -> Result<()> {
