@@ -1,0 +1,22 @@
+{
+  "body_text": null,
+  "content_type": "application/json",
+  "id": "ky_public_notice:larue",
+  "notes": [
+    "Snapshot not found for artifact id ky_public_notice:larue.",
+    "Snapshot not found for artifact id ky_public_notice:larue.",
+    "Snapshot not found for artifact id ky_public_notice:larue."
+  ],
+  "source": {
+    "kind": "public_notice",
+    "retrieved_at": "2026-01-10T01:45:16Z",
+    "value": "ky_public_notice:Larue"
+  },
+  "tags": [
+    "public_notice",
+    "larue",
+    "ky",
+    "extract_failed"
+  ],
+  "title": "KY Public Notice: Larue"
+}
