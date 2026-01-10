@@ -159,9 +159,16 @@ struct ConstitutionMapEntry {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum ConstitutionMapValue {
+    Entry(ConstitutionMapEntry),
+    Score(f64),
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct ConstitutionMapFile {
     #[serde(flatten)]
-    axes: HashMap<String, ConstitutionMapEntry>,
+    axes: HashMap<String, ConstitutionMapValue>,
 }
 
 impl Rubric {
@@ -282,6 +289,13 @@ fn load_constitution_map(path: &PathBuf) -> Result<HashMap<String, Vec<String>>>
     let parsed: ConstitutionMapFile = serde_yaml::from_str(&raw)?;
     let mut map = HashMap::new();
     for (axis, entry) in parsed.axes {
+        let entry = match entry {
+            ConstitutionMapValue::Entry(entry) => entry,
+            ConstitutionMapValue::Score(_) => {
+                map.insert(axis, Vec::new());
+                continue;
+            }
+        };
         let mut refs = Vec::new();
         if let Some(amendments) = entry.amendments {
             refs.extend(amendments.into_iter().map(|value| format!("Amendment {value}")));

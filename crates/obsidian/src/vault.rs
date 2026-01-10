@@ -411,7 +411,7 @@ fn write_score_report(conn: &Connection, paths: &VaultPaths) -> Result<()> {
 
     let mut stmt = conn.prepare(
         r#"
-        SELECT decision_scores.overall_score, decision_scores.flags_json, motions.text
+        SELECT decision_scores.overall_score, decision_scores.flags_json, COALESCE(motions.text, '')
         FROM decision_scores
         JOIN motions ON decision_scores.motion_id = motions.id
         JOIN meetings ON motions.meeting_id = meetings.id

@@ -373,13 +373,25 @@ fn ingest_dir(dir: PathBuf, db_path: &str) -> Result<()> {
     let mut failed = 0usize;
     let mut skipped = 0usize;
 
-    for entry in fs::read_dir(&dir)? {
-        let entry = entry?;
+    let mut entries = fs::read_dir(&dir)?
+        .filter_map(|entry| entry.ok())
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.path());
+
+    for entry in entries {
         let path = entry.path();
         if !path.is_file() {
             continue;
         }
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            skipped += 1;
+            continue;
+        }
+        let filename = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
+        if filename.ends_with("_manifest.json")
+            || filename.ends_with("_state.json")
+            || filename.ends_with(".schema.json")
+        {
             skipped += 1;
             continue;
         }
@@ -399,11 +411,16 @@ fn ingest_dir(dir: PathBuf, db_path: &str) -> Result<()> {
                 continue;
             }
         };
+        if let Err(err) = serde_json::from_value::<civic_core::schema::Artifact>(raw_json.clone()) {
+            skipped += 1;
+            eprintln!("Skipping non-artifact JSON {}: {err}", path.display());
+            continue;
+        }
         let artifact_id = match raw_json.get("id").and_then(|value| value.as_str()) {
             Some(value) => value,
             None => {
-                failed += 1;
-                eprintln!("Missing artifact id in {}", path.display());
+                skipped += 1;
+                eprintln!("Skipping artifact without id in {}", path.display());
                 continue;
             }
         };
@@ -1961,7 +1978,7 @@ fn load_decisions(
         let mut meeting = meeting?;
         let mut motion_stmt = conn.prepare(
             r#"
-            SELECT id, text, result
+            SELECT id, COALESCE(text, '') as text, result
             FROM motions
             WHERE meeting_id = ?1
             ORDER BY motion_index ASC, id ASC
@@ -1987,7 +2004,7 @@ fn load_score_summary(
 ) -> Result<ScoreSummary> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT decision_scores.overall_score, decision_scores.flags_json, motions.text
+        SELECT decision_scores.overall_score, decision_scores.flags_json, COALESCE(motions.text, '')
         FROM decision_scores
         JOIN motions ON decision_scores.motion_id = motions.id
         JOIN meetings ON motions.meeting_id = meetings.id
@@ -2245,7 +2262,7 @@ fn load_official_summaries(
         r#"
         SELECT decision_scores.overall_score, decision_scores.axis_json,
                decision_scores.flags_json, decision_scores.evidence_json,
-               motions.text, meetings.started_at, meetings.artifact_ids_json
+               COALESCE(motions.text, ''), meetings.started_at, meetings.artifact_ids_json
         FROM decision_scores
         JOIN motions ON decision_scores.motion_id = motions.id
         JOIN meetings ON motions.meeting_id = meetings.id

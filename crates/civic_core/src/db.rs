@@ -107,7 +107,24 @@ fn init(conn: &Connection) -> Result<()> {
         );
         "#,
     )?;
+    ensure_motions_text_column(conn)?;
     seed_bodies(conn)?;
+    Ok(())
+}
+
+fn ensure_motions_text_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(motions)")?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let mut has_text = false;
+    for column in columns {
+        if column? == "text" {
+            has_text = true;
+            break;
+        }
+    }
+    if !has_text {
+        conn.execute("ALTER TABLE motions ADD COLUMN text TEXT", params![])?;
+    }
     Ok(())
 }
 
