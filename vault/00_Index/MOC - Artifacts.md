@@ -2,4 +2,4 @@
 
 This index is generated. Do not edit manually.
 
-- [[Artifacts/demo-001|Demo Artifact]]
+- [[Artifacts/ky_public_notice:larue|KY Public Notice: Larue]]
