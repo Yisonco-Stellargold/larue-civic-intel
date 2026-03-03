@@ -2892,8 +2892,6 @@ fn render_official_detail(official: &OfficialSummary, week_date: &str) -> String
 </main>
 {footer}
     "#,
-        nav = nav_html(week_date),
-        footer = footer_html(week_date),
         name = official.name,
         grade = official.letter_grade,
         grade_class = grade_class,

@@ -162,7 +162,7 @@ struct ConstitutionMapEntry {
 #[serde(untagged)]
 enum ConstitutionMapValue {
     Entry(ConstitutionMapEntry),
-    Score(#[allow(dead_code)] f64),
+    Score(f64),
 }
 
 #[derive(Debug, Clone, Deserialize)]
