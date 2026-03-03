@@ -35,6 +35,17 @@ Generate a weekly report note and JSON summary with:
 
 - `larue report-weekly --config ./config.toml`
 
+
+## Full MVP local smoke test
+
+From a clean clone:
+
+1. `cp config.example.toml config.toml`
+2. `cargo run -p cli -- run-weekly --config ./config.toml`
+3. `test -f out/site/index.html && echo "out/site/index.html exists"`
+
+The weekly command is designed to exit successfully when no decisions directory exists, no notices are found, or no meetings are parsed yet (non-fatal stages log warnings and continue).
+
 ## Historical backfill (Wayback Machine)
 
 Enable the Wayback source in `config.toml` to backfill archived snapshots and detect quiet edits.
