@@ -42,10 +42,16 @@ target/
 __pycache__/
 *.pyc
 
+# Runtime outputs (generated)
+out/
+vault/
+.tmp/
+
 # Databases
 *.db
 *.sqlite
 *.sqlite3
+civic.db
 
 # Obsidian runtime files
 .obsidian/workspace*

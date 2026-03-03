@@ -45,23 +45,26 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Restore prior state artifact
-        uses: actions/download-artifact@v4
-        continue-on-error: true
+      - name: Restore state cache
+        uses: actions/cache/restore@v4
         with:
-          name: larue-state
-          path: .tmp/larue-state
+          path: |
+            out/state
+            out/artifacts
+          key: larue-state-${{ github.ref_name }}
+          restore-keys: |
+            larue-state-
 
-      - name: Restore state directories
+      - name: Ensure state directories
         run: |
           mkdir -p out/state out/artifacts
-          if [ -d ".tmp/larue-state/out/state" ]; then
-            cp -R .tmp/larue-state/out/state/* out/state/ || true
-          else
+
+      - name: Cache status
+        run: |
+          if [ "$(find out/state out/artifacts -type f | wc -l)" -eq 0 ]; then
             echo "No prior larue-state artifact found (first run). Continuing."
-          fi
-          if [ -d ".tmp/larue-state/out/artifacts" ]; then
-            cp -R .tmp/larue-state/out/artifacts/* out/artifacts/ || true
+          else
+            echo "Restored cached state files."
           fi
 
       - name: Run Wayback backfill
@@ -104,6 +107,14 @@ jobs:
             out/state
             out/artifacts
           retention-days: 30
+
+      - name: Save state cache
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            out/state
+            out/artifacts
+          key: larue-state-${{ github.ref_name }}-${{ github.run_id }}
 
       - name: Upload IPFS metadata
         uses: actions/upload-artifact@v4

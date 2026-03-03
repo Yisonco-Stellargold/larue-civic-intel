@@ -191,6 +191,7 @@ def run() -> int:
     parser.add_argument("--start", type=str)
     parser.add_argument("--end", type=str)
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--rate-limit-seconds", type=float)
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
 
@@ -226,6 +227,8 @@ def run() -> int:
 
     if args.limit is not None:
         limit_per_run = args.limit
+    if args.rate_limit_seconds is not None:
+        rate_limit = args.rate_limit_seconds
 
     out_dir = Path(out_dir_value)
     artifacts_dir = out_dir / "artifacts"
